@@ -1,14 +1,16 @@
-import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import { DropdownComponent, ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import { listTerminals, readScreen, sendText, OrcaCommandError, OrcaUnreachableError } from "./orca-cli";
 
 export const ORCA_CHAT_VIEW_TYPE = "orca-chat-view";
 
+const NO_SESSION_VALUE = "";
+
 export class OrcaChatView extends ItemView {
-	private select!: HTMLSelectElement;
+	private dropdown!: DropdownComponent;
 	private output!: HTMLPreElement;
 	private input!: HTMLInputElement;
-	private pollHandle: number | null = null;
 	private hasWarnedThisPoll = false;
+	private pollInFlight = false;
 
 	constructor(leaf: WorkspaceLeaf) {
 		super(leaf);
@@ -31,8 +33,9 @@ export class OrcaChatView extends ItemView {
 		container.empty();
 		container.addClass("orca-chat-view");
 
-		this.select = container.createEl("select", { cls: "orca-chat-session-select" });
-		this.select.onfocus = () => void this.populateSessions();
+		this.dropdown = new DropdownComponent(container);
+		this.dropdown.selectEl.addClass("orca-chat-session-select");
+		this.dropdown.selectEl.onfocus = () => void this.populateSessions();
 
 		this.output = container.createEl("pre", { cls: "orca-chat-output" });
 
@@ -47,49 +50,46 @@ export class OrcaChatView extends ItemView {
 		});
 
 		await this.populateSessions();
-		this.pollHandle = window.setInterval(() => void this.pollScreen(), 500);
-	}
-
-	async onClose(): Promise<void> {
-		if (this.pollHandle !== null) {
-			window.clearInterval(this.pollHandle);
-			this.pollHandle = null;
-		}
+		this.registerInterval(window.setInterval(() => void this.pollScreen(), 500));
 	}
 
 	getSelectedHandle(): string | null {
-		return this.select?.value || null;
+		return this.dropdown?.getValue() || null;
 	}
 
 	focusPicker(): void {
-		this.select?.focus();
+		this.dropdown?.selectEl.focus();
 	}
 
-	async sendToSelected(text: string): Promise<void> {
+	async sendToSelected(text: string): Promise<boolean> {
 		const handle = this.getSelectedHandle();
 		if (!handle) {
 			new Notice("Pick a session in the Orca Chat pane first");
-			return;
+			return false;
 		}
 		try {
 			await sendText(handle, text);
+			return true;
 		} catch (err) {
 			this.reportError(err);
+			return false;
 		}
 	}
 
 	private async populateSessions(): Promise<void> {
-		const previousValue = this.select.value;
+		const previousValue = this.getSelectedHandle();
 		try {
 			const terminals = await listTerminals();
-			this.select.empty();
-			for (const terminal of terminals) {
-				const option = this.select.createEl("option", {
-					value: terminal.handle,
-					text: `${terminal.agentIdentity} — ${terminal.title}`,
-				});
-				if (terminal.handle === previousValue) option.selected = true;
+			this.dropdown.selectEl.empty();
+			const stillExists = terminals.some((t) => t.handle === previousValue);
+			if (!stillExists) {
+				this.dropdown.addOption(NO_SESSION_VALUE, "— pick a session —");
+				if (previousValue) new Notice("Orca Chat: previous session ended — pick another");
 			}
+			for (const terminal of terminals) {
+				this.dropdown.addOption(terminal.handle, `${terminal.agentIdentity} — ${terminal.title}`);
+			}
+			if (stillExists && previousValue) this.dropdown.setValue(previousValue);
 		} catch (err) {
 			this.reportError(err);
 		}
@@ -98,23 +98,17 @@ export class OrcaChatView extends ItemView {
 	private async handleSend(): Promise<void> {
 		const text = this.input.value;
 		if (!text) return;
-		const handle = this.getSelectedHandle();
-		if (!handle) {
-			new Notice("Pick a session first");
-			return;
-		}
-		try {
-			await sendText(handle, text);
+		if (await this.sendToSelected(text)) {
 			this.input.value = "";
-		} catch (err) {
-			this.reportError(err);
 		}
 	}
 
 	private async pollScreen(): Promise<void> {
+		if (this.pollInFlight) return;
 		if (this.output.offsetParent === null) return;
 		const handle = this.getSelectedHandle();
 		if (!handle) return;
+		this.pollInFlight = true;
 		try {
 			const lines = await readScreen(handle);
 			this.output.textContent = lines.join("\n");
@@ -124,6 +118,8 @@ export class OrcaChatView extends ItemView {
 				this.reportError(err);
 				this.hasWarnedThisPoll = true;
 			}
+		} finally {
+			this.pollInFlight = false;
 		}
 	}
 

@@ -1,9 +1,9 @@
 import { App, Modal } from "obsidian";
 
 export class AnnotateModal extends Modal {
-	private onSubmit: (question: string) => void;
+	private onSubmit: (question: string) => Promise<boolean>;
 
-	constructor(app: App, onSubmit: (question: string) => void) {
+	constructor(app: App, onSubmit: (question: string) => Promise<boolean>) {
 		super(app);
 		this.onSubmit = onSubmit;
 	}
@@ -15,19 +15,26 @@ export class AnnotateModal extends Modal {
 		input.style.width = "100%";
 		input.focus();
 
-		const submit = () => {
+		const buttonRow = contentEl.createDiv();
+		const sendButton = buttonRow.createEl("button", { text: "Send", cls: "mod-cta" });
+
+		let submitting = false;
+		const submit = async () => {
+			if (submitting) return;
 			const question = input.value.trim();
 			if (!question) return;
-			this.onSubmit(question);
-			this.close();
+			submitting = true;
+			sendButton.disabled = true;
+			const sent = await this.onSubmit(question);
+			submitting = false;
+			sendButton.disabled = false;
+			if (sent) this.close();
 		};
 
 		input.addEventListener("keydown", (evt) => {
-			if (evt.key === "Enter") submit();
+			if (evt.key === "Enter") void submit();
 		});
-
-		const buttonRow = contentEl.createDiv();
-		buttonRow.createEl("button", { text: "Send", cls: "mod-cta" }).onclick = submit;
+		sendButton.onclick = () => void submit();
 	}
 
 	onClose(): void {

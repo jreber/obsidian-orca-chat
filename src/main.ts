@@ -26,7 +26,9 @@ export default class OrcaChatPlugin extends Plugin {
 		});
 	}
 
-	onunload() {}
+	onunload() {
+		this.app.workspace.detachLeavesOfType(ORCA_CHAT_VIEW_TYPE);
+	}
 
 	async activateChatView(): Promise<WorkspaceLeaf> {
 		const existing = this.app.workspace.getLeavesOfType(ORCA_CHAT_VIEW_TYPE);
@@ -40,22 +42,33 @@ export default class OrcaChatPlugin extends Plugin {
 		return leaf;
 	}
 
-	private getChatView(): OrcaChatView | null {
+	private async resolveChatView(leaf: WorkspaceLeaf): Promise<OrcaChatView | null> {
+		if (leaf.isDeferred) await leaf.loadIfDeferred();
+		return leaf.view instanceof OrcaChatView ? leaf.view : null;
+	}
+
+	private async getChatView(): Promise<OrcaChatView | null> {
 		const leaves = this.app.workspace.getLeavesOfType(ORCA_CHAT_VIEW_TYPE);
 		if (leaves.length === 0) return null;
-		return leaves[0].view as OrcaChatView;
+		return this.resolveChatView(leaves[0]);
 	}
 
 	private async runAnnotate(selection: string): Promise<void> {
-		let chatView = this.getChatView();
+		let chatView = await this.getChatView();
 		if (!chatView) {
 			const leaf = await this.activateChatView();
-			chatView = leaf.view as OrcaChatView;
+			chatView = await this.resolveChatView(leaf);
+			if (!chatView) {
+				new Notice("Orca Chat: could not open the chat pane");
+				return;
+			}
+		}
+		if (!chatView.getSelectedHandle()) {
 			chatView.focusPicker();
 		}
 		const view = chatView;
-		new AnnotateModal(this.app, (question) => {
-			void view.sendToSelected(`${selection}\n\n${question}`);
+		new AnnotateModal(this.app, async (question) => {
+			return view.sendToSelected(`${selection}\n\n${question}`);
 		}).open();
 	}
 }
