@@ -1,10 +1,11 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { AnnotateModal } from "./annotate-modal";
 import { ORCA_CHAT_VIEW_TYPE, OrcaChatView } from "./chat-view";
+import { PairingModal } from "./pairing-modal";
 
 export default class OrcaChatPlugin extends Plugin {
 	async onload() {
-		this.registerView(ORCA_CHAT_VIEW_TYPE, (leaf) => new OrcaChatView(leaf));
+		this.registerView(ORCA_CHAT_VIEW_TYPE, (leaf) => new OrcaChatView(leaf, this));
 
 		this.addCommand({
 			id: "open-orca-chat",
@@ -23,6 +24,12 @@ export default class OrcaChatPlugin extends Plugin {
 				}
 				void this.runAnnotate(selection);
 			},
+		});
+
+		this.addCommand({
+			id: "pair-with-orca",
+			name: "Pair with Orca",
+			callback: () => new PairingModal(this.app, this).open(),
 		});
 	}
 

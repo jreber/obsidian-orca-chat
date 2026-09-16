@@ -8,8 +8,14 @@
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
 	},
+	"dependencies": {
+		"tweetnacl": "^1.0.3",
+		"ws": "^8.21.3",
+		"zod": "~4.5.4"
+	},
 	"devDependencies": {
 		"@types/node": "^20.14.0",
+		"@types/ws": "^8.18.1",
 		"esbuild": "^0.21.5",
 		"obsidian": "^1.5.7",
 		"typescript": "^5.5.3"

@@ -25,10 +25,10 @@ export class AnnotateModal extends Modal {
 			if (!question) return;
 			submitting = true;
 			sendButton.disabled = true;
-			const sent = await this.onSubmit(question);
+			await this.onSubmit(question);
 			submitting = false;
 			sendButton.disabled = false;
-			if (sent) this.close();
+			this.close();
 		};
 
 		input.addEventListener("keydown", (evt) => {
