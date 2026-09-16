@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export interface OrcaTerminal {
 	handle: string;
@@ -24,10 +26,20 @@ export class OrcaCommandError extends Error {
 	}
 }
 
-// Tried in order; whichever answers first is cached and tried first next time,
-// so the plugin keeps working whether the user has the stable Orca app, the
-// Orca Dev build, or (during Orca development) both running at once.
-const ORCA_BINARIES = ["orca-dev", "orca"] as const;
+// Bare names first (in case PATH already has them), then fixed install
+// locations. Obsidian is launched as a GUI app and gets macOS's plain
+// default PATH — it never sees the extra directories Orca injects only
+// into terminals it spawns itself, so the bare names alone are not
+// enough even though they work from a shell or an Orca-managed terminal.
+// Tried in order; whichever answers first is cached and tried first next
+// time, so the plugin keeps working whether the user has the stable Orca
+// app, the Orca Dev build, or (during Orca development) both at once.
+const ORCA_BINARIES = [
+	"orca-dev",
+	"orca",
+	join(homedir(), "Library", "Application Support", "orca-dev", "cli", "bin", "orca-dev"),
+	"/Applications/Orca.app/Contents/Resources/bin/orca",
+];
 let preferredBinary: string = ORCA_BINARIES[0];
 
 function execOnce(binary: string, args: string[]): Promise<unknown> {
