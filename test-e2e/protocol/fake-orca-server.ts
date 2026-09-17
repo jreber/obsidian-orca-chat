@@ -88,6 +88,8 @@ export class FakeOrcaServer {
 	private historyBySession = new Map<string, AgentSessionHistoryPage>();
 	private subscriptions: Subscription[] = [];
 	private receivedCalls = new Map<string, unknown[]>();
+	private subscriptionReady: Promise<void> | null = null;
+	private resolveSubscription: (() => void) | null = null;
 
 	private constructor(wss: WebSocketServer, keyPair: nacl.BoxKeyPair) {
 		this.wss = wss;
@@ -125,6 +127,21 @@ export class FakeOrcaServer {
 
 	setSessionHistory(sessionId: string, page: AgentSessionHistoryPage): void {
 		this.historyBySession.set(sessionId, page);
+	}
+
+	async waitForSubscription(sessionId: string): Promise<void> {
+		while (true) {
+			if (this.subscriptions.some((sub) => sub.sessionId === sessionId)) {
+				return;
+			}
+			await new Promise<void>((resolve) => {
+				const oldResolve = this.resolveSubscription;
+				this.resolveSubscription = () => {
+					oldResolve?.();
+					resolve();
+				};
+			});
+		}
 	}
 
 	pushHistoryEvent(sessionId: string, event: AgentSessionSubscribeEvent): void {
@@ -172,6 +189,7 @@ export class FakeOrcaServer {
 			case "agentSession.subscribe": {
 				const sessionId = String(params.sessionId);
 				this.subscriptions.push({ conn, requestId: id, sessionId });
+				this.resolveSubscription?.();
 				return;
 			}
 			case "agentSession.send":

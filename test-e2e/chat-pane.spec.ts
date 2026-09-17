@@ -82,3 +82,29 @@ test("clicking an approval option notifies the fake server and reflects a pushed
 
 	await expect(obsidian.locator(".orca-chat-prompt-resolved")).toHaveText("✓ Yes");
 });
+
+test("a pushed batch event renders a new bubble without reopening the pane", async ({ server, obsidian }) => {
+	server.setSessionTabs([agentSessionTab("sess-1", "My chat")]);
+	server.setSessionHistory("sess-1", historyPage("sess-1", [textMessageItem("item-1", 1, "user", "first message")]));
+
+	const dropdown = obsidian.locator(".orca-chat-session-select");
+	await dropdown.focus();
+	await expect(dropdown.locator('option[value="sess-1"]')).toBeAttached();
+	await dropdown.selectOption("sess-1");
+	await expect(obsidian.locator(".orca-chat-message-body")).toHaveText("first message");
+
+	await server.waitForSubscription("sess-1");
+
+	server.pushHistoryEvent("sess-1", {
+		type: "batch",
+		sessionId: "sess-1",
+		batch: {
+			cursor: { epoch: "e2e", sequence: 2 },
+			items: [textMessageItem("item-2", 2, "assistant", "pushed reply")],
+			removedItemIds: [],
+			submissions: [],
+		},
+	});
+
+	await expect(obsidian.locator(".orca-chat-message-body")).toHaveText(["first message", "pushed reply"]);
+});
