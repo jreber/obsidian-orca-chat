@@ -88,7 +88,6 @@ export class FakeOrcaServer {
 	private historyBySession = new Map<string, AgentSessionHistoryPage>();
 	private subscriptions: Subscription[] = [];
 	private receivedCalls = new Map<string, unknown[]>();
-	private subscriptionReady: Promise<void> | null = null;
 	private resolveSubscription: (() => void) | null = null;
 
 	private constructor(wss: WebSocketServer, keyPair: nacl.BoxKeyPair) {

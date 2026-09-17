@@ -78,9 +78,7 @@ test("pushHistoryEvent delivers a batch to an open subscription", async () => {
 		await client.connect(server.credential);
 		const events: unknown[] = [];
 		const unsubscribe = client.subscribeAgentSessionHistory("sess-1", (event) => events.push(event));
-		// ponytail: fixed delay to let the subscribe handshake land — OrcaRemoteClient exposes no
-		// "subscription is open" callback. Upgrade to a real ready-signal if this proves flaky.
-		await new Promise((resolve) => setTimeout(resolve, 300));
+		await server.waitForSubscription("sess-1");
 		const item = textMessageItem("item-2", 1, "assistant", "hi there");
 		const batchEvent = {
 			type: "batch" as const,

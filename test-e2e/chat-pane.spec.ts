@@ -74,6 +74,7 @@ test("clicking an approval option notifies the fake server and reflects a pushed
 			resolution: { state: "resolved" as const, selectedOptionId: "opt-yes", resolvedBy: "test", resolvedAt: Date.now() },
 		},
 	};
+	await server.waitForSubscription("sess-1");
 	server.pushHistoryEvent("sess-1", {
 		type: "batch",
 		sessionId: "sess-1",
