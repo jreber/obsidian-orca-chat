@@ -1,6 +1,6 @@
 import { chromium, type Browser, type Page } from "playwright";
 import { test as base } from "@playwright/test";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -61,7 +61,7 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 			}),
 		);
 
-		let child: ReturnType<typeof spawn> | undefined;
+		let child: ChildProcess | undefined;
 		let browser: Browser | undefined;
 		try {
 			child = spawn(
@@ -95,12 +95,34 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 			await use(page);
 		} finally {
 			await browser?.close().catch(() => {});
-			child?.kill();
+			if (child) {
+				child.kill();
+				await waitForChildExit(child, 5_000);
+			}
 			rmSync(vaultDir, { recursive: true, force: true });
 			rmSync(userDataDir, { recursive: true, force: true });
 		}
 	},
 });
+
+// Obsidian's Electron helpers (renderer, GPU, network service, utility) keep the vault/userData
+// dirs open for a brief window after the main process receives SIGTERM. child.kill() returns
+// immediately, so without this wait the rmSync calls right after it race the still-shutting-down
+// process and intermittently fail with ENOTEMPTY. SIGKILL escalation bounds the wait for a process
+// that ignores SIGTERM entirely.
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	await new Promise<void>((resolve) => {
+		const timer = setTimeout(() => {
+			child.kill("SIGKILL");
+			resolve();
+		}, timeoutMs);
+		child.once("exit", () => {
+			clearTimeout(timer);
+			resolve();
+		});
+	});
+}
 
 async function waitForFirstPage(browser: Browser): Promise<Page> {
 	for (let attempt = 0; attempt < 40; attempt++) {
