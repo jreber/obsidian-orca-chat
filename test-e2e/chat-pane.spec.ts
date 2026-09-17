@@ -108,3 +108,20 @@ test("a pushed batch event renders a new bubble without reopening the pane", asy
 
 	await expect(obsidian.locator(".orca-chat-message-body")).toHaveText(["first message", "pushed reply"]);
 });
+
+test("a session disappearing from the tab list shows a notice and doesn't crash the pane", async ({ server, obsidian }) => {
+	server.setSessionTabs([agentSessionTab("sess-1", "My chat")]);
+	server.setSessionHistory("sess-1", historyPage("sess-1", [textMessageItem("item-1", 1, "user", "hello")]));
+
+	const dropdown = obsidian.locator(".orca-chat-session-select");
+	await dropdown.focus();
+	await expect(dropdown.locator('option[value="sess-1"]')).toBeAttached();
+	await dropdown.selectOption("sess-1");
+
+	server.setSessionTabs([]);
+	await dropdown.blur();
+	await dropdown.focus(); // re-triggers populateSessions, the same as any real refresh
+
+	await expect(obsidian.getByText("Orca Chat: previous session ended — pick another")).toBeVisible();
+	await expect(dropdown).toHaveValue("");
+});
