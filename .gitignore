@@ -3,3 +3,7 @@ main.js
 *.js.map
 .smoke/
 .test-build/
+test-e2e/fixture-vault/.obsidian/plugins/orca-chat/*
+!test-e2e/fixture-vault/.obsidian/plugins/orca-chat/.gitkeep
+playwright-report/
+test-results/
