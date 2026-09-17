@@ -108,19 +108,34 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 // Obsidian's Electron helpers (renderer, GPU, network service, utility) keep the vault/userData
 // dirs open for a brief window after the main process receives SIGTERM. child.kill() returns
 // immediately, so without this wait the rmSync calls right after it race the still-shutting-down
-// process and intermittently fail with ENOTEMPTY. SIGKILL escalation bounds the wait for a process
-// that ignores SIGTERM entirely.
-async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+// process and intermittently fail with ENOTEMPTY.
+//
+// If the process doesn't exit within `timeoutMs`, escalate to SIGKILL — but even SIGKILL isn't
+// instant from this process's point of view: Electron's helper processes typically only tear down
+// once they notice their IPC pipe to the main process has closed, which is an async step, not a
+// synchronous side effect of the kill syscall. So we give SIGKILL its own short, bounded
+// `killTimeoutMs` window to actually produce an "exit" event before giving up. Either way the total
+// wait is capped at `timeoutMs + killTimeoutMs` — this never blocks forever on a process that
+// refuses to die.
+async function waitForChildExit(child: ChildProcess, timeoutMs: number, killTimeoutMs = 3_000): Promise<void> {
 	if (child.exitCode !== null || child.signalCode !== null) return;
 	await new Promise<void>((resolve) => {
-		const timer = setTimeout(() => {
+		let settled = false;
+		let killTimer: ReturnType<typeof setTimeout> | undefined;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(sigtermTimer);
+			clearTimeout(killTimer);
+			child.off("exit", onExit);
+			resolve();
+		};
+		const onExit = () => finish();
+		const sigtermTimer = setTimeout(() => {
 			child.kill("SIGKILL");
-			resolve();
+			killTimer = setTimeout(finish, killTimeoutMs);
 		}, timeoutMs);
-		child.once("exit", () => {
-			clearTimeout(timer);
-			resolve();
-		});
+		child.once("exit", onExit);
 	});
 }
 
