@@ -1,7 +1,10 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { AnnotateModal } from "./annotate-modal";
+import { buildAnnotateMessage, formatLocation, lineRangeFromEditorCursors, readingModeLineRange, sectionInfoToLineTag } from "./annotate-location";
 import { ORCA_CHAT_VIEW_TYPE, OrcaChatView } from "./chat-view";
 import { PairingModal } from "./pairing-modal";
+
+const ORCA_LINE_TAG_ATTR = "orcaLine";
 
 export default class OrcaChatPlugin extends Plugin {
 	async onload() {
@@ -16,14 +19,31 @@ export default class OrcaChatPlugin extends Plugin {
 		this.addCommand({
 			id: "annotate-selection-with-orca",
 			name: "Annotate selection with Orca",
-			editorCallback: (editor) => {
-				const selection = editor.getSelection();
-				if (!selection) {
+			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "H" }],
+			// Plain callback, not editorCallback: editorCallback only fires when
+			// workspace.activeEditor is set, which Reading Mode never does (there is no CodeMirror
+			// instance behind rendered markdown). Resolving the selection by hand lets one command
+			// work in both Edit and Reading mode.
+			callback: () => {
+				const resolved = this.resolveSelectionWithLocation();
+				if (!resolved) {
 					new Notice("Select text first");
 					return;
 				}
-				void this.runAnnotate(selection);
+				void this.runAnnotate(resolved.text, resolved.location);
 			},
+		});
+
+		// Tags every top-level rendered block with its source line range (as a data attribute) so
+		// Reading Mode annotate can recover line numbers from a plain DOM Selection, the same as
+		// Edit Mode gets for free from the editor's cursor positions. Reading Mode has no CodeMirror
+		// instance to ask, but MarkdownPostProcessorContext.getSectionInfo is public API for exactly
+		// this block-to-source-line mapping.
+		this.registerMarkdownPostProcessor((el, ctx) => {
+			for (const child of Array.from(el.children)) {
+				const info = ctx.getSectionInfo(child as HTMLElement);
+				if (info) (child as HTMLElement).dataset[ORCA_LINE_TAG_ATTR] = sectionInfoToLineTag(info.lineStart, info.lineEnd);
+			}
 		});
 
 		this.addCommand({
@@ -49,6 +69,36 @@ export default class OrcaChatPlugin extends Plugin {
 		return leaf;
 	}
 
+	private resolveSelectionWithLocation(): { text: string; location: string | null } | null {
+		const activeEditor = this.app.workspace.activeEditor;
+		if (activeEditor?.editor) {
+			const text = activeEditor.editor.getSelection();
+			if (!text) return null;
+			const from = activeEditor.editor.getCursor("from");
+			const to = activeEditor.editor.getCursor("to");
+			const location = formatLocation(activeEditor.file?.path ?? null, lineRangeFromEditorCursors(from.line, to.line));
+			return { text, location };
+		}
+
+		// Reading Mode: no editor, but the rendered markdown is still a normal DOM selection. Line
+		// numbers come from the data attributes the markdown post-processor above stamped onto each
+		// rendered block.
+		const selection = window.getSelection();
+		const text = selection?.toString().trim() ?? "";
+		if (!text || !selection || selection.rangeCount === 0) return null;
+		const range = selection.getRangeAt(0);
+		const location = formatLocation(
+			this.app.workspace.getActiveFile()?.path ?? null,
+			readingModeLineRange(this.nearestLineTag(range.startContainer), this.nearestLineTag(range.endContainer)),
+		);
+		return { text, location };
+	}
+
+	private nearestLineTag(node: Node): string | undefined {
+		const el = node instanceof Element ? node : node.parentElement;
+		return (el?.closest("[data-orca-line]") as HTMLElement | null)?.dataset[ORCA_LINE_TAG_ATTR];
+	}
+
 	private async resolveChatView(leaf: WorkspaceLeaf): Promise<OrcaChatView | null> {
 		if (leaf.isDeferred) await leaf.loadIfDeferred();
 		return leaf.view instanceof OrcaChatView ? leaf.view : null;
@@ -60,7 +110,7 @@ export default class OrcaChatPlugin extends Plugin {
 		return this.resolveChatView(leaves[0]);
 	}
 
-	private async runAnnotate(selection: string): Promise<void> {
+	private async runAnnotate(selection: string, location: string | null): Promise<void> {
 		let chatView = await this.getChatView();
 		if (!chatView) {
 			const leaf = await this.activateChatView();
@@ -75,7 +125,7 @@ export default class OrcaChatPlugin extends Plugin {
 		}
 		const view = chatView;
 		new AnnotateModal(this.app, async (question) => {
-			return view.sendToSelected(`${selection}\n\n${question}`);
+			return view.sendToSelected(buildAnnotateMessage(selection, question, location));
 		}).open();
 	}
 }
