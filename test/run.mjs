@@ -1,6 +1,7 @@
-// Bundles test/**/*.test.ts with esbuild (aliasing the real, types-only `obsidian` package to
-// test/fakes/obsidian.ts) and runs the result with Node's built-in test runner. No test framework
-// dependency needed — node:test + node:assert cover this plugin's needs.
+// Bundles test/**/*.test.ts with esbuild (aliasing the real, types-only `obsidian` package, and
+// the Obsidian-process-only `electron` module, to fakes under test/fakes/) and runs the result
+// with Node's built-in test runner. No test framework dependency needed — node:test + node:assert
+// cover this plugin's needs.
 import { build } from "esbuild";
 import { readdirSync, rmSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -35,7 +36,10 @@ await build({
 	format: "esm",
 	target: "es2022",
 	outExtension: { ".js": ".mjs" },
-	alias: { obsidian: path.join(testDir, "fakes", "obsidian.ts") },
+	alias: {
+		obsidian: path.join(testDir, "fakes", "obsidian.ts"),
+		electron: path.join(testDir, "fakes", "electron.ts"),
+	},
 	// Bundle only our own source (relative/absolute imports); leave every node_modules package
 	// (ws, tweetnacl, jsdom, zod, ...) as a real `import` for Node to resolve at runtime. Several
 	// of them (ws, tweetnacl) do dynamic `require()`s of Node built-ins that esbuild cannot bundle

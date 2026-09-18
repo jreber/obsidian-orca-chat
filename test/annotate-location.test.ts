@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
 	formatLocation,
 	buildAnnotateMessage,
+	buildObsidianOpenUri,
 	lineRangeFromEditorCursors,
 	sectionInfoToLineTag,
 	parseLineTag,
@@ -38,6 +39,31 @@ test("buildAnnotateMessage quotes every line of a multi-line selection, with the
 	assert.equal(
 		buildAnnotateMessage("line one\nline two", "why?", "notes/foo.md:5-6"),
 		"> line one\n> line two [notes/foo.md:5-6]\n\nwhy?",
+	);
+});
+
+test("buildAnnotateMessage renders the citation as a clickable obsidian:// link when a URI is given", () => {
+	assert.equal(
+		buildAnnotateMessage("hi", "why?", "notes/foo.md:5", "obsidian://open?vault=Vault&file=notes%2Ffoo.md"),
+		"> hi [notes/foo.md:5](obsidian://open?vault=Vault&file=notes%2Ffoo.md)\n\nwhy?",
+	);
+});
+
+test("buildAnnotateMessage falls back to a plain bracketed citation without a URI", () => {
+	assert.equal(buildAnnotateMessage("hi", "why?", "notes/foo.md:5", null), "> hi [notes/foo.md:5]\n\nwhy?");
+});
+
+test("buildObsidianOpenUri builds an obsidian://open deep link for a vault-relative file path", () => {
+	assert.equal(
+		buildObsidianOpenUri("My Vault", "notes/foo.md"),
+		"obsidian://open?vault=My+Vault&file=notes%2Ffoo.md",
+	);
+});
+
+test("buildObsidianOpenUri percent-encodes characters that would otherwise break a markdown link", () => {
+	assert.equal(
+		buildObsidianOpenUri("Vault", "notes/a (draft).md"),
+		"obsidian://open?vault=Vault&file=notes%2Fa+%28draft%29.md",
 	);
 });
 

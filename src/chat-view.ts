@@ -1,9 +1,55 @@
+import { shell } from "electron";
 import { DropdownComponent, ItemView, Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { buildSingleSessionEmbedUrl } from "./embed-url";
 import { loadPairedCredential, OrcaPairingError, type PairedCredential } from "./orca-pairing";
 import { OrcaRemoteClient, OrcaRemoteError, type StructuredSessionTab } from "./orca-remote-client";
 
 export const ORCA_CHAT_VIEW_TYPE = "orca-chat-view";
+
+// The single-session embed's chat transcript cites vault files as real obsidian://open links
+// (see annotate-location.ts's buildObsidianOpenUri) so they're both clickable and demonstrate the
+// link format to the agent in-context.
+//
+// A target="_blank" click on an *unregistered custom scheme* never reaches Electron's webview
+// "new-window"/popup machinery — verified empirically, Chromium silently drops the attempt before
+// any host-level hook fires (an identical click on an https:// link does fire "new-window";
+// obsidian:// produces nothing at all). So interception has to happen inside the guest's own click
+// handling. Obsidian's will-attach-webview strips the guest's preload script, so there's no
+// ipc-message channel, and a <webview> guest is a separate top-level browsing context (no
+// window.parent), so there's no postMessage either. The one channel that survives both
+// restrictions: `webview.executeJavaScript()` is a host-side <webview> API (unaffected by the
+// guest's own sandbox) that injects a click listener into the guest, and the guest reports back by
+// console.log-ing a marker string, which Electron proxies to the host as a "console-message" DOM
+// event on the <webview> element — no preload needed on either side of that round trip.
+const OBSIDIAN_LINK_CONSOLE_MARKER = "orca-chat:obsidian-link:";
+
+function obsidianLinkInterceptorScript(marker: string): string {
+	return `(function () {
+		if (window.__orcaObsidianLinkInterceptorInstalled) return;
+		window.__orcaObsidianLinkInterceptorInstalled = true;
+		document.addEventListener("click", function (event) {
+			var anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+			if (!anchor) return;
+			var href = anchor.getAttribute("href") || "";
+			if (href.indexOf("obsidian://") !== 0) return;
+			event.preventDefault();
+			console.log(${JSON.stringify(marker)} + href);
+		}, true);
+	})();`;
+}
+
+export function interceptObsidianLinks(
+	webview: HTMLElement & { executeJavaScript?: (code: string) => Promise<unknown> },
+): void {
+	webview.addEventListener("dom-ready", () => {
+		void webview.executeJavaScript?.(obsidianLinkInterceptorScript(OBSIDIAN_LINK_CONSOLE_MARKER));
+	});
+	webview.addEventListener("console-message", ((event: Event) => {
+		const message = (event as unknown as { message?: unknown }).message;
+		if (typeof message !== "string" || !message.startsWith(OBSIDIAN_LINK_CONSOLE_MARKER)) return;
+		void shell.openExternal(message.slice(OBSIDIAN_LINK_CONSOLE_MARKER.length));
+	}) as EventListener);
+}
 
 const NO_SESSION_VALUE = "";
 
@@ -182,6 +228,7 @@ export class OrcaChatView extends ItemView {
 		webview.setAttribute("partition", `orca-embed-${entry.sessionId}-${Date.now()}`);
 		webview.dataset.orcaSessionId = entry.sessionId;
 		webview.addClass("orca-chat-webview");
+		interceptObsidianLinks(webview);
 		this.embedContainer.appendChild(webview);
 		this.currentWebview = webview;
 		this.statusLabel.setText("● Live chat");

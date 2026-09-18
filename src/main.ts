@@ -1,6 +1,6 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { AnnotateModal } from "./annotate-modal";
-import { buildAnnotateMessage, formatLocation, lineRangeFromEditorCursors, readingModeLineRange, sectionInfoToLineTag } from "./annotate-location";
+import { buildAnnotateMessage, buildObsidianOpenUri, formatLocation, lineRangeFromEditorCursors, readingModeLineRange, sectionInfoToLineTag } from "./annotate-location";
 import { ORCA_CHAT_VIEW_TYPE, OrcaChatView } from "./chat-view";
 import { PairingModal } from "./pairing-modal";
 
@@ -30,7 +30,7 @@ export default class OrcaChatPlugin extends Plugin {
 					new Notice("Select text first");
 					return;
 				}
-				void this.runAnnotate(resolved.text, resolved.location);
+				void this.runAnnotate(resolved.text, resolved.location, resolved.filePath);
 			},
 		});
 
@@ -69,15 +69,16 @@ export default class OrcaChatPlugin extends Plugin {
 		return leaf;
 	}
 
-	private resolveSelectionWithLocation(): { text: string; location: string | null } | null {
+	private resolveSelectionWithLocation(): { text: string; filePath: string | null; location: string | null } | null {
 		const activeEditor = this.app.workspace.activeEditor;
 		if (activeEditor?.editor) {
 			const text = activeEditor.editor.getSelection();
 			if (!text) return null;
 			const from = activeEditor.editor.getCursor("from");
 			const to = activeEditor.editor.getCursor("to");
-			const location = formatLocation(activeEditor.file?.path ?? null, lineRangeFromEditorCursors(from.line, to.line));
-			return { text, location };
+			const filePath = activeEditor.file?.path ?? null;
+			const location = formatLocation(filePath, lineRangeFromEditorCursors(from.line, to.line));
+			return { text, filePath, location };
 		}
 
 		// Reading Mode: no editor, but the rendered markdown is still a normal DOM selection. Line
@@ -87,11 +88,12 @@ export default class OrcaChatPlugin extends Plugin {
 		const text = selection?.toString().trim() ?? "";
 		if (!text || !selection || selection.rangeCount === 0) return null;
 		const range = selection.getRangeAt(0);
+		const filePath = this.app.workspace.getActiveFile()?.path ?? null;
 		const location = formatLocation(
-			this.app.workspace.getActiveFile()?.path ?? null,
+			filePath,
 			readingModeLineRange(this.nearestLineTag(range.startContainer), this.nearestLineTag(range.endContainer)),
 		);
-		return { text, location };
+		return { text, filePath, location };
 	}
 
 	private nearestLineTag(node: Node): string | undefined {
@@ -110,7 +112,7 @@ export default class OrcaChatPlugin extends Plugin {
 		return this.resolveChatView(leaves[0]);
 	}
 
-	private async runAnnotate(selection: string, location: string | null): Promise<void> {
+	private async runAnnotate(selection: string, location: string | null, filePath: string | null): Promise<void> {
 		let chatView = await this.getChatView();
 		if (!chatView) {
 			const leaf = await this.activateChatView();
@@ -124,8 +126,9 @@ export default class OrcaChatPlugin extends Plugin {
 			chatView.focusPicker();
 		}
 		const view = chatView;
+		const citationUri = filePath ? buildObsidianOpenUri(this.app.vault.getName(), filePath) : null;
 		new AnnotateModal(this.app, async (question) => {
-			return view.sendToSelected(buildAnnotateMessage(selection, question, location));
+			return view.sendToSelected(buildAnnotateMessage(selection, question, location, citationUri));
 		}).open();
 	}
 }
