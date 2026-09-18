@@ -11,8 +11,10 @@ export function formatLocation(filePath: string | null, lineRange: LineRange | n
 }
 
 export function buildAnnotateMessage(selection: string, question: string, location: string | null): string {
-	const body = `${selection}\n\n${question}`;
-	return location ? `[${location}]\n${body}` : body;
+	const lines = selection.split("\n");
+	const citation = location ? ` [${location}]` : "";
+	const quoted = lines.map((line, i) => `> ${line}${i === lines.length - 1 ? citation : ""}`).join("\n");
+	return `${quoted}\n\n${question}`;
 }
 
 export function lineRangeFromEditorCursors(fromLine: number, toLine: number): LineRange {

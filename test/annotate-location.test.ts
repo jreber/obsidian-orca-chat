@@ -26,12 +26,19 @@ test("formatLocation returns null when there is no file", () => {
 	assert.equal(formatLocation(null, null), null);
 });
 
-test("buildAnnotateMessage matches the pre-existing selection+question format when there is no location", () => {
-	assert.equal(buildAnnotateMessage("hi", "why?", null), "hi\n\nwhy?");
+test("buildAnnotateMessage quotes the selection as a blockquote when there is no location", () => {
+	assert.equal(buildAnnotateMessage("hi", "why?", null), "> hi\n\nwhy?");
 });
 
-test("buildAnnotateMessage prepends a bracketed location line when present", () => {
-	assert.equal(buildAnnotateMessage("hi", "why?", "notes/foo.md:5"), "[notes/foo.md:5]\nhi\n\nwhy?");
+test("buildAnnotateMessage quotes the selection with a bracketed citation appended", () => {
+	assert.equal(buildAnnotateMessage("hi", "why?", "notes/foo.md:5"), "> hi [notes/foo.md:5]\n\nwhy?");
+});
+
+test("buildAnnotateMessage quotes every line of a multi-line selection, with the citation on the last line", () => {
+	assert.equal(
+		buildAnnotateMessage("line one\nline two", "why?", "notes/foo.md:5-6"),
+		"> line one\n> line two [notes/foo.md:5-6]\n\nwhy?",
+	);
 });
 
 test("lineRangeFromEditorCursors converts 0-indexed editor lines to a 1-indexed inclusive range", () => {

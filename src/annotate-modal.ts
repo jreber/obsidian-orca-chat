@@ -19,22 +19,22 @@ export class AnnotateModal extends Modal {
 		const sendButton = buttonRow.createEl("button", { text: "Send", cls: "mod-cta" });
 
 		let submitting = false;
-		const submit = async () => {
+		const submit = () => {
 			if (submitting) return;
 			const question = input.value.trim();
 			if (!question) return;
 			submitting = true;
-			sendButton.disabled = true;
-			await this.onSubmit(question);
-			submitting = false;
-			sendButton.disabled = false;
+			// Close immediately: the send is a network round-trip, and waiting for
+			// it here just makes the modal feel laggy. sendToSelected/reportError
+			// already surface delivery failures via Notice.
+			void this.onSubmit(question);
 			this.close();
 		};
 
 		input.addEventListener("keydown", (evt) => {
-			if (evt.key === "Enter") void submit();
+			if (evt.key === "Enter") submit();
 		});
-		sendButton.onclick = () => void submit();
+		sendButton.onclick = () => submit();
 	}
 
 	onClose(): void {

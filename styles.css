@@ -24,104 +24,15 @@
 	white-space: nowrap;
 }
 
-.orca-chat-output {
-	flex: 1 1 auto;
-	overflow-y: auto;
-	padding: 12px;
+.orca-chat-embed {
+	flex: 1;
 	display: flex;
-	flex-direction: column;
-	gap: 10px;
+	min-height: 0;
 }
 
-.orca-chat-message {
-	max-width: 85%;
-	padding: 6px 12px;
-	border-radius: 12px;
-	background: var(--background-secondary);
-}
-
-.orca-chat-message-user {
-	align-self: flex-end;
-	background: var(--interactive-accent);
-	color: var(--text-on-accent);
-}
-
-.orca-chat-message-assistant {
-	align-self: flex-start;
-}
-
-.orca-chat-message-tool,
-.orca-chat-message-system {
-	align-self: stretch;
-	max-width: 100%;
-	background: transparent;
-	border: 1px solid var(--background-modifier-border);
-	padding: 4px 10px;
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-}
-
-.orca-chat-message-role {
-	font-size: var(--font-ui-smaller);
-	font-weight: 600;
-	opacity: 0.75;
-	margin-bottom: 2px;
-}
-
-.orca-chat-message-body {
-	white-space: pre-wrap;
-	overflow-wrap: anywhere;
-	margin: 0;
-	font-family: var(--font-text);
-}
-
-.orca-chat-message-detail {
-	margin-top: 4px;
-}
-
-.orca-chat-message-detail > summary {
-	cursor: pointer;
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-}
-
-.orca-chat-body-code {
-	font-family: var(--font-monospace);
-	font-size: var(--font-ui-smaller);
-	background: var(--code-background);
-	padding: 6px 8px;
-	border-radius: 6px;
-	overflow-x: auto;
-	margin-top: 4px;
-}
-
-.orca-chat-prompt {
-	border: 1px solid var(--interactive-accent);
-	background: var(--background-secondary);
-	color: var(--text-normal);
-}
-
-.orca-chat-prompt-options {
-	display: flex;
-	gap: 6px;
-	margin-top: 6px;
-	flex-wrap: wrap;
-}
-
-.orca-chat-prompt-resolved {
-	margin-top: 4px;
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-}
-
-.orca-chat-input-row {
-	display: flex;
-	gap: 8px;
-	padding: 8px;
-	border-top: 1px solid var(--background-modifier-border);
-	flex-shrink: 0;
-}
-
-.orca-chat-input-row input {
-	flex: 1 1 auto;
+.orca-chat-webview {
+	flex: 1;
+	width: 100%;
+	height: 100%;
+	border: none;
 }
