@@ -15,6 +15,40 @@ more time into polishing this plugin's own renderer further: what would it take 
 Orca Mobile's actual UI inside an Obsidian pane (e.g. a webview pointed at Orca's mobile web
 client, if one exists) rather than hand-rolling a second one here.
 
+## Idea explored and built: quizzing / flashcards / Anki (2026-09-20)
+
+**Update (2026-09-20):** pursued after all — see
+`knowledge/docs/superpowers/specs/2026-09-20-kg-flashcard-review-design.md` and
+`knowledge/docs/superpowers/plans/2026-09-20-kg-flashcard-review.md` for the design and
+implementation. The rest of this entry is kept as the historical record of the initial "is this
+worth building" jam.
+
+James jammed on whether the `knowledge` vault (wikilinked glossary notes per paper/topic — see
+`~/repos/knowledge`) should grow a self-quizzing layer, since orca-chat and the say-plugin already
+form a little "learning constellation" around it (capture as linked notes → converse about them →
+hear them read aloud). Conclusion: **premature, parked as a future direction, not spec'd.**
+
+Key points from the jam:
+
+- The want was "both, roughly equally": an immediate comprehension check right after
+  reading/writing notes, and long-term retention (spaced repetition) so concepts don't decay.
+- The comprehension-check half needs **no new code** — orca-chat already sends highlighted text +
+  a question into a live agent session, so "quiz me on this note" works today.
+- The retention half (spaced repetition) is the part that would need real building, and that's
+  only a real problem once the vault has enough breadth that forgetting is actually happening —
+  right now it's one paper's worth of glossary, a few weeks old. Building it now would be
+  optimizing for a pain not yet felt.
+- Embedding the actual Anki app inside an Obsidian pane isn't realistic — Anki is a native Qt app,
+  not a web app, so there's no webview trick (unlike the Orca Mobile webview idea above).
+- If/when this becomes worth building for real, two existing paths were scouted:
+  - `obsidian-spaced-repetition` — native SM-2 spaced repetition inside Obsidian itself, no Anki,
+    no context-switch. James's preference when asked, tentatively.
+  - `Obsidian_to_Anki` — pushes specially-formatted notes into real Anki decks via AnkiConnect
+    (local HTTP API on `localhost:8765` when Anki is running); gets Anki's mobile review and
+    scheduler, at the cost of a separate app to keep running.
+- The signal to watch for before reopening this: actually noticing forgotten concepts as the vault
+  grows, or wishing orca-chat's ad hoc quizzing were scheduled/tracked rather than one-off.
+
 ## Before claiming something works
 
 **Run `npm test` and `npm run build` before saying a fix is done.** `npm test` runs a real,
