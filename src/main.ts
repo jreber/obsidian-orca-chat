@@ -1,6 +1,7 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { AnnotateModal } from "./annotate-modal";
 import { buildAnnotateMessage, buildObsidianOpenUri, formatLocation, lineRangeFromEditorCursors, readingModeLineRange, sectionInfoToLineTag } from "./annotate-location";
+import { buildFlashcardAskMessage, FlashcardContext, isReviewModalOpen, resolveCurrentFlashcard } from "./flashcard-context";
 import { ORCA_CHAT_VIEW_TYPE, OrcaChatView } from "./chat-view";
 import { PairingModal } from "./pairing-modal";
 
@@ -18,13 +19,26 @@ export default class OrcaChatPlugin extends Plugin {
 
 		this.addCommand({
 			id: "annotate-selection-with-orca",
-			name: "Annotate selection with Orca",
+			name: "Ask Orca about this",
 			hotkeys: [{ modifiers: ["Mod", "Shift"], key: "H" }],
 			// Plain callback, not editorCallback: editorCallback only fires when
 			// workspace.activeEditor is set, which Reading Mode never does (there is no CodeMirror
 			// instance behind rendered markdown). Resolving the selection by hand lets one command
 			// work in both Edit and Reading mode.
+			//
+			// Branches on flashcard-review context first: if a spaced-repetition review modal is
+			// open, that's always stronger intent than a leftover text selection in a background
+			// editor, so it wins unconditionally rather than checking selection first.
 			callback: () => {
+				if (isReviewModalOpen(document)) {
+					const card = resolveCurrentFlashcard(this.app);
+					if (!card) {
+						new Notice("Couldn't read the current flashcard — the Spaced Repetition plugin may have changed");
+						return;
+					}
+					void this.runFlashcardAsk(card);
+					return;
+				}
 				const resolved = this.resolveSelectionWithLocation();
 				if (!resolved) {
 					new Notice("Select text first");
@@ -112,23 +126,38 @@ export default class OrcaChatPlugin extends Plugin {
 		return this.resolveChatView(leaves[0]);
 	}
 
-	private async runAnnotate(selection: string, location: string | null, filePath: string | null): Promise<void> {
+	private async ensureChatViewReady(): Promise<OrcaChatView | null> {
 		let chatView = await this.getChatView();
 		if (!chatView) {
 			const leaf = await this.activateChatView();
 			chatView = await this.resolveChatView(leaf);
 			if (!chatView) {
 				new Notice("Orca Chat: could not open the chat pane");
-				return;
+				return null;
 			}
 		}
 		if (!chatView.getSelectedHandle()) {
 			chatView.focusPicker();
 		}
-		const view = chatView;
+		return chatView;
+	}
+
+	private async runAnnotate(selection: string, location: string | null, filePath: string | null): Promise<void> {
+		const view = await this.ensureChatViewReady();
+		if (!view) return;
 		const citationUri = filePath ? buildObsidianOpenUri(this.app.vault.getName(), filePath) : null;
 		new AnnotateModal(this.app, async (question) => {
 			return view.sendToSelected(buildAnnotateMessage(selection, question, location, citationUri));
 		}).open();
+	}
+
+	private async runFlashcardAsk(card: FlashcardContext): Promise<void> {
+		const view = await this.ensureChatViewReady();
+		if (!view) return;
+		new AnnotateModal(
+			this.app,
+			async (question) => view.sendToSelected(buildFlashcardAskMessage(card.front, card.back, card.sourceLink, question)),
+			"Ask Orca about this flashcard",
+		).open();
 	}
 }
