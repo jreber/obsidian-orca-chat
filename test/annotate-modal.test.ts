@@ -41,3 +41,17 @@ test("closes immediately on submit, without waiting for onSubmit to resolve", as
 	resolveSubmit(true);
 	await Promise.resolve();
 });
+
+test("renders a custom title when one is provided", async () => {
+	const modal = new AnnotateModal(new App(), async () => true, "Ask Orca about this flashcard");
+	modal.open();
+	const heading = modal.contentEl.querySelector("h3") as HTMLElement;
+	assert.equal(heading.textContent, "Ask Orca about this flashcard");
+});
+
+test("falls back to the default title when none is provided", async () => {
+	const modal = new AnnotateModal(new App(), async () => true);
+	modal.open();
+	const heading = modal.contentEl.querySelector("h3") as HTMLElement;
+	assert.equal(heading.textContent, "Ask Orca about this selection");
+});

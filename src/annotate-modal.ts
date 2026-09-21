@@ -2,15 +2,21 @@ import { App, Modal } from "obsidian";
 
 export class AnnotateModal extends Modal {
 	private onSubmit: (question: string) => Promise<boolean>;
+	private title: string;
 
-	constructor(app: App, onSubmit: (question: string) => Promise<boolean>) {
+	constructor(
+		app: App,
+		onSubmit: (question: string) => Promise<boolean>,
+		title = "Ask Orca about this selection",
+	) {
 		super(app);
 		this.onSubmit = onSubmit;
+		this.title = title;
 	}
 
 	onOpen(): void {
 		const { contentEl } = this;
-		contentEl.createEl("h3", { text: "Ask Orca about this selection" });
+		contentEl.createEl("h3", { text: this.title });
 		const input = contentEl.createEl("input", { type: "text", placeholder: "Your question…" });
 		input.style.width = "100%";
 		input.focus();
