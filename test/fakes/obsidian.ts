@@ -94,6 +94,13 @@ export class App {
 	workspace: Record<string, unknown> = {};
 }
 
+export class TFile {
+	path: string;
+	constructor(path: string) {
+		this.path = path;
+	}
+}
+
 export class Plugin extends Component {
 	app: App;
 	private data: unknown = null;
