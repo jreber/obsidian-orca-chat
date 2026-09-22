@@ -1,13 +1,74 @@
 import { chromium, type Browser, type Page } from "playwright";
 import { test as base } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { FakeOrcaServer } from "../protocol/fake-orca-server";
 
 const FIXTURE_VAULT = path.resolve(import.meta.dirname, "../fixture-vault");
-const OBSIDIAN_BINARY = "/Applications/Obsidian.app/Contents/MacOS/Obsidian";
+const FLATPAK_APP_ID = "md.obsidian.Obsidian";
+
+type ObsidianLauncher = { command: string; args: string[]; flatpak: boolean };
+
+// OBSIDIAN_BINARY overrides the executable; OBSIDIAN_BINARY_ARGS (space-separated) is prepended to
+// Obsidian's own args, e.g. OBSIDIAN_BINARY=flatpak OBSIDIAN_BINARY_ARGS="run md.obsidian.Obsidian".
+function resolveObsidianLauncher(): ObsidianLauncher {
+	const override = process.env.OBSIDIAN_BINARY;
+	if (override) {
+		const args = (process.env.OBSIDIAN_BINARY_ARGS ?? "").split(" ").filter(Boolean);
+		return { command: override, args, flatpak: path.basename(override) === "flatpak" };
+	}
+	if (process.platform === "darwin") {
+		return { command: "/Applications/Obsidian.app/Contents/MacOS/Obsidian", args: [], flatpak: false };
+	}
+	if (process.platform === "win32") {
+		const localAppData = process.env.LOCALAPPDATA ?? path.join(homedir(), "AppData", "Local");
+		return { command: path.join(localAppData, "Programs", "Obsidian", "Obsidian.exe"), args: [], flatpak: false };
+	}
+	// Looked up rather than probed: running Obsidian to check it exists would open a window.
+	const onPath = (process.env.PATH ?? "")
+		.split(path.delimiter)
+		.map((dir) => path.join(dir, "obsidian"))
+		.find((candidate) => existsSync(candidate));
+	if (onPath) {
+		return { command: onPath, args: [], flatpak: false };
+	}
+	if (spawnSync("flatpak", ["info", FLATPAK_APP_ID], { stdio: "ignore" }).status === 0) {
+		return { command: "flatpak", args: ["run", FLATPAK_APP_ID], flatpak: true };
+	}
+	throw new Error("Obsidian not found: install it (flatpak, AppImage on PATH as `obsidian`) or set OBSIDIAN_BINARY");
+}
+
+const LAUNCHER = resolveObsidianLauncher();
+
+// Flatpak apps get a private /tmp, so a vault under the host's tmpdir() is invisible to the sandboxed
+// Obsidian; its default permissions do include the home directory.
+function e2eTempRoot(): string {
+	if (!LAUNCHER.flatpak) return tmpdir();
+	const root = path.join(homedir(), ".cache", "orca-chat-e2e");
+	mkdirSync(root, { recursive: true });
+	return root;
+}
+
+// `flatpak run` execs bwrap, which does not forward SIGTERM into the sandbox, so killing the child
+// leaves Obsidian running. Stop exactly the instance whose bwrap pid is our child — never
+// `flatpak kill <app id>`, which would also take down the user's own Obsidian.
+async function killOwnFlatpakInstance(child: ChildProcess): Promise<void> {
+	if (!LAUNCHER.flatpak || child.pid === undefined) return;
+	const ownInstance = () =>
+		execFileSync("flatpak", ["ps", "--columns=instance,pid"], { encoding: "utf8" })
+			.split("\n")
+			.map((line) => line.trim().split(/\s+/))
+			.find(([instance, pid]) => instance && pid === String(child.pid))?.[0];
+	const instance = ownInstance();
+	if (!instance) return;
+	spawnSync("flatpak", ["kill", instance], { stdio: "ignore" });
+	// `flatpak kill` returns before the sandbox exits; removing the vault while it still runs races.
+	for (let attempt = 0; attempt < 20 && ownInstance(); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+}
 
 export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 	server: async ({}, use) => {
@@ -46,8 +107,8 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 	// vault registry, which is exactly what pre-seeding the config accomplishes, with no vault-picker
 	// screen in between.
 	obsidian: async ({ server }, use) => {
-		const vaultDir = mkdtempSync(path.join(tmpdir(), "orca-chat-e2e-vault-"));
-		const userDataDir = mkdtempSync(path.join(tmpdir(), "orca-chat-e2e-userdata-"));
+		const vaultDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-vault-"));
+		const userDataDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-userdata-"));
 		cpSync(FIXTURE_VAULT, vaultDir, { recursive: true });
 		writeFileSync(
 			path.join(vaultDir, ".obsidian", "plugins", "orca-chat", "data.json"),
@@ -65,8 +126,8 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 		let browser: Browser | undefined;
 		try {
 			child = spawn(
-				OBSIDIAN_BINARY,
-				[`--remote-debugging-port=0`, `--user-data-dir=${userDataDir}`],
+				LAUNCHER.command,
+				[...LAUNCHER.args, `--remote-debugging-port=0`, `--user-data-dir=${userDataDir}`],
 				{ stdio: ["ignore", "pipe", "pipe"] },
 			);
 
@@ -87,6 +148,7 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 			const page = await waitForFirstPage(browser);
 			await dismissFirstRunPrompts(page);
 			await page.waitForFunction(() => "app" in window);
+			await closeStrayWindows(browser, page);
 			await page.evaluate(() => {
 				const win = window as unknown as { app: { commands: { executeCommandById: (id: string) => void } } };
 				win.app.commands.executeCommandById("orca-chat:open-orca-chat");
@@ -96,6 +158,7 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 		} finally {
 			await browser?.close().catch(() => {});
 			if (child) {
+				await killOwnFlatpakInstance(child);
 				child.kill();
 				await waitForChildExit(child, 5_000);
 			}
@@ -161,6 +224,19 @@ async function dismissFirstRunPrompts(page: Page): Promise<void> {
 	if (await trustButton.isVisible().catch(() => false)) {
 		await trustButton.click();
 	}
+}
+
+// On a fresh --user-data-dir, Obsidian (seen on 1.13) can open its Settings in a second, focused
+// window during first run. Obsidian renders Notices into `activeDocument` — the focused window — so
+// while that window lives, every Notice lands there instead of the main window under test.
+async function closeStrayWindows(browser: Browser, mainPage: Page): Promise<void> {
+	for (const page of browser.contexts().flatMap((ctx) => ctx.pages())) {
+		if (page !== mainPage) await page.close().catch(() => {});
+	}
+	await mainPage.bringToFront();
+	await mainPage.waitForFunction(() => (window as unknown as { activeDocument?: Document }).activeDocument === document, undefined, {
+		timeout: 10_000,
+	});
 }
 
 export { expect } from "@playwright/test";

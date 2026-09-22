@@ -1,3 +1,4 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import nacl from "tweetnacl";
 import { generateKeyPair, publicKeyToBase64 } from "../../src/orca-remote/e2ee-crypto";
@@ -75,6 +76,12 @@ function minimalSubmission(clientMessageId: string) {
 	};
 }
 
+// How the fake answers GET /single-session-index.html — the page Orca's single-session embed loads.
+// "missing": 404 with an empty body, exactly what Orca's static handler returned before the page was
+// part of the desktop build. "drop": the connection closes with no response (a network-level load
+// failure). { html }: a 200 page, standing in for a working Orca build.
+export type EmbedPageMode = "missing" | "drop" | { html: string };
+
 interface Subscription {
 	conn: ServerConnection;
 	requestId: string;
@@ -82,30 +89,37 @@ interface Subscription {
 }
 
 export class FakeOrcaServer {
+	private readonly http: Server;
 	private readonly wss: WebSocketServer;
 	private readonly keyPair: nacl.BoxKeyPair;
+	private embedPage: EmbedPageMode = "missing";
 	private tabs: AgentSessionTab[] = [];
 	private historyBySession = new Map<string, AgentSessionHistoryPage>();
 	private subscriptions: Subscription[] = [];
 	private receivedCalls = new Map<string, unknown[]>();
 	private resolveSubscription: (() => void) | null = null;
 
-	private constructor(wss: WebSocketServer, keyPair: nacl.BoxKeyPair) {
+	private constructor(http: Server, wss: WebSocketServer, keyPair: nacl.BoxKeyPair) {
+		this.http = http;
 		this.wss = wss;
 		this.keyPair = keyPair;
 	}
 
 	static async start(): Promise<FakeOrcaServer> {
 		const keyPair = generateKeyPair();
-		const wss = new WebSocketServer({ port: 0 });
-		await new Promise<void>((resolve) => wss.once("listening", resolve));
-		const server = new FakeOrcaServer(wss, keyPair);
+		// Same origin for RPC and the embed page, as in real Orca: the plugin derives the embed's
+		// http:// origin from the pairing's ws:// endpoint.
+		const http = createServer();
+		const wss = new WebSocketServer({ server: http });
+		await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+		const server = new FakeOrcaServer(http, wss, keyPair);
+		http.on("request", (req, res) => server.handleHttp(req, res));
 		wss.on("connection", (ws) => server.handleConnection(ws));
 		return server;
 	}
 
 	get port(): number {
-		const address = this.wss.address();
+		const address = this.http.address();
 		if (typeof address === "string" || address === null) throw new Error("FakeOrcaServer has no port");
 		return address.port;
 	}
@@ -122,6 +136,10 @@ export class FakeOrcaServer {
 
 	setSessionTabs(tabs: AgentSessionTab[]): void {
 		this.tabs = tabs;
+	}
+
+	setEmbedPage(mode: EmbedPageMode): void {
+		this.embedPage = mode;
 	}
 
 	setSessionHistory(sessionId: string, page: AgentSessionHistoryPage): void {
@@ -155,7 +173,28 @@ export class FakeOrcaServer {
 	}
 
 	async stop(): Promise<void> {
+		for (const client of this.wss.clients) client.terminate();
 		await new Promise<void>((resolve, reject) => this.wss.close((err) => (err ? reject(err) : resolve())));
+		this.http.closeAllConnections();
+		await new Promise<void>((resolve, reject) => this.http.close((err) => (err ? reject(err) : resolve())));
+	}
+
+	private handleHttp(req: IncomingMessage, res: ServerResponse): void {
+		const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+		if (pathname !== "/single-session-index.html") {
+			res.writeHead(404).end();
+			return;
+		}
+		const mode = this.embedPage;
+		if (mode === "drop") {
+			req.socket.destroy();
+			return;
+		}
+		if (mode === "missing") {
+			res.writeHead(404).end();
+			return;
+		}
+		res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(mode.html);
 	}
 
 	private handleConnection(ws: WebSocket): void {

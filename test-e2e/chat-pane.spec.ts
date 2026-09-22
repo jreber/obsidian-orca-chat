@@ -14,7 +14,8 @@ test("selecting a session mounts a webview pointed at Orca's single-session UI",
 	const src = await webview.getAttribute("src");
 	const expectedOrigin = server.credential.endpoint.replace(/^ws/, "http");
 	expect(src).toMatch(new RegExp(`^${expectedOrigin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/single-session-index\\.html\\?`));
-	expect(src).toContain("sessionId=sess-1");
+	// "session", not "sessionId": Orca's parseSingleSessionLocation() contract (see embed-url.ts).
+	expect(src).toContain("session=sess-1");
 	expect(src).toMatch(/[?&]pairing=/);
 
 	const partition = await webview.getAttribute("partition");
