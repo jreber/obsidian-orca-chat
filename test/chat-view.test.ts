@@ -15,7 +15,9 @@ Object.assign(globalThis, {
 const obsidianFake = await import("./fakes/obsidian.ts");
 obsidianFake.installDomExtensions();
 const { WorkspaceLeaf, App, Plugin } = obsidianFake;
-const { OrcaChatView, ORCA_CHAT_VIEW_TYPE, interceptObsidianLinks } = await import("../src/chat-view.ts");
+const { OrcaChatView, ORCA_CHAT_VIEW_TYPE, interceptObsidianLinks, watchEmbedLoad } = await import(
+	"../src/chat-view.ts"
+);
 const { shell } = await import("electron");
 
 function makeView() {
@@ -99,4 +101,89 @@ test("interceptObsidianLinks ignores console-message events without the marker p
 	} finally {
 		shell.openExternal = original;
 	}
+});
+
+// A <webview> that 404s still "loads" (Chromium renders the error body and fires did-finish-load),
+// so load failure has to be read from the main frame's HTTP status as well as did-fail-load.
+function webviewEvent(type: string, fields: Record<string, unknown>): Event {
+	return Object.assign(new Event(type), fields);
+}
+
+function watch() {
+	const webview = makeFakeWebview();
+	const outcomes: string[] = [];
+	watchEmbedLoad(webview, {
+		onLoaded: () => outcomes.push("loaded"),
+		onFailed: (reason) => outcomes.push(`failed: ${reason}`),
+	});
+	return { webview, outcomes };
+}
+
+test("watchEmbedLoad reports loaded after a 200 main-frame navigation finishes", () => {
+	const { webview, outcomes } = watch();
+	webview.dispatchEvent(webviewEvent("did-start-loading", {}));
+	webview.dispatchEvent(
+		webviewEvent("did-frame-navigate", { isMainFrame: true, httpResponseCode: 200, httpStatusText: "OK" }),
+	);
+	webview.dispatchEvent(webviewEvent("did-finish-load", {}));
+	assert.deepEqual(outcomes, ["loaded"]);
+});
+
+test("watchEmbedLoad reports an HTTP 404 main frame as a failure, not as loaded", () => {
+	const { webview, outcomes } = watch();
+	webview.dispatchEvent(webviewEvent("did-start-loading", {}));
+	webview.dispatchEvent(
+		webviewEvent("did-frame-navigate", { isMainFrame: true, httpResponseCode: 404, httpStatusText: "Not Found" }),
+	);
+	webview.dispatchEvent(
+		webviewEvent("did-fail-load", {
+			isMainFrame: true,
+			errorCode: -379,
+			errorDescription: "ERR_HTTP_RESPONSE_CODE_FAILURE",
+		}),
+	);
+	webview.dispatchEvent(webviewEvent("did-finish-load", {}));
+	assert.deepEqual(outcomes, ["failed: HTTP 404 Not Found"]);
+});
+
+test("watchEmbedLoad reports a network-level did-fail-load", () => {
+	const { webview, outcomes } = watch();
+	webview.dispatchEvent(
+		webviewEvent("did-fail-load", {
+			isMainFrame: true,
+			errorCode: -102,
+			errorDescription: "ERR_CONNECTION_REFUSED",
+		}),
+	);
+	assert.deepEqual(outcomes, ["failed: ERR_CONNECTION_REFUSED (-102)"]);
+});
+
+test("watchEmbedLoad ignores aborted loads and subframe failures", () => {
+	const { webview, outcomes } = watch();
+	webview.dispatchEvent(
+		webviewEvent("did-fail-load", { isMainFrame: true, errorCode: -3, errorDescription: "ERR_ABORTED" }),
+	);
+	webview.dispatchEvent(
+		webviewEvent("did-fail-load", { isMainFrame: false, errorCode: -102, errorDescription: "ERR_CONNECTION_REFUSED" }),
+	);
+	webview.dispatchEvent(
+		webviewEvent("did-frame-navigate", { isMainFrame: false, httpResponseCode: 500, httpStatusText: "" }),
+	);
+	webview.dispatchEvent(webviewEvent("did-finish-load", {}));
+	assert.deepEqual(outcomes, ["loaded"]);
+});
+
+test("watchEmbedLoad re-arms on a new load so a reload can recover", () => {
+	const { webview, outcomes } = watch();
+	webview.dispatchEvent(webviewEvent("did-start-loading", {}));
+	webview.dispatchEvent(
+		webviewEvent("did-frame-navigate", { isMainFrame: true, httpResponseCode: 503, httpStatusText: "" }),
+	);
+	webview.dispatchEvent(webviewEvent("did-finish-load", {}));
+	webview.dispatchEvent(webviewEvent("did-start-loading", {}));
+	webview.dispatchEvent(
+		webviewEvent("did-frame-navigate", { isMainFrame: true, httpResponseCode: 200, httpStatusText: "OK" }),
+	);
+	webview.dispatchEvent(webviewEvent("did-finish-load", {}));
+	assert.deepEqual(outcomes, ["failed: HTTP 503", "loaded"]);
 });

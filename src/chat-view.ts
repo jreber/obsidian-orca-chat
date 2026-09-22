@@ -51,6 +51,48 @@ export function interceptObsidianLinks(
 	}) as EventListener);
 }
 
+// Chromium's "navigation aborted" code: a superseded or cancelled load, not a failure.
+const ERR_ABORTED = -3;
+
+// A <webview> whose page 404s still fires did-finish-load (Chromium renders the error body), so
+// did-fail-load alone can't tell a missing page from a working one; the main frame's HTTP status
+// from did-frame-navigate covers that case. Reports at most once per load; did-start-loading re-arms.
+export function watchEmbedLoad(
+	webview: HTMLElement,
+	handlers: { onLoaded: () => void; onFailed: (reason: string) => void },
+): void {
+	let failed = false;
+	const fail = (reason: string) => {
+		if (failed) return;
+		failed = true;
+		handlers.onFailed(reason);
+	};
+	webview.addEventListener("did-start-loading", () => {
+		failed = false;
+	});
+	webview.addEventListener("did-frame-navigate", ((event: Event) => {
+		const { isMainFrame, httpResponseCode, httpStatusText } = event as unknown as {
+			isMainFrame?: boolean;
+			httpResponseCode?: number;
+			httpStatusText?: string;
+		};
+		if (!isMainFrame || typeof httpResponseCode !== "number" || httpResponseCode < 400) return;
+		fail(`HTTP ${httpResponseCode}${httpStatusText ? ` ${httpStatusText}` : ""}`);
+	}) as EventListener);
+	webview.addEventListener("did-fail-load", ((event: Event) => {
+		const { isMainFrame, errorCode, errorDescription } = event as unknown as {
+			isMainFrame?: boolean;
+			errorCode?: number;
+			errorDescription?: string;
+		};
+		if (!isMainFrame || errorCode === ERR_ABORTED) return;
+		fail(`${errorDescription || "load failed"} (${errorCode})`);
+	}) as EventListener);
+	webview.addEventListener("did-finish-load", () => {
+		if (!failed) handlers.onLoaded();
+	});
+}
+
 const NO_SESSION_VALUE = "";
 
 export class OrcaChatView extends ItemView {
@@ -229,9 +271,21 @@ export class OrcaChatView extends ItemView {
 		webview.dataset.orcaSessionId = entry.sessionId;
 		webview.addClass("orca-chat-webview");
 		interceptObsidianLinks(webview);
+		watchEmbedLoad(webview, {
+			onLoaded: () => {
+				if (this.currentWebview === webview) this.statusLabel.setText("● Live chat");
+			},
+			onFailed: (reason) => {
+				if (this.currentWebview !== webview) return;
+				this.statusLabel.setText("⚠ Chat failed to load");
+				new Notice(`Orca Chat: couldn't load the chat from Orca — ${reason}`);
+				// The URL carries the pairing token, so log the session and reason only.
+				console.error(`[orca-chat] embed failed to load for session ${entry.sessionId}: ${reason}`);
+			},
+		});
 		this.embedContainer.appendChild(webview);
 		this.currentWebview = webview;
-		this.statusLabel.setText("● Live chat");
+		this.statusLabel.setText("Connecting…");
 	}
 
 	private teardownWebview(): void {
