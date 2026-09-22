@@ -7,3 +7,6 @@ test-e2e/fixture-vault/.obsidian/plugins/orca-chat/*
 !test-e2e/fixture-vault/.obsidian/plugins/orca-chat/.gitkeep
 playwright-report/
 test-results/
+
+# Agent-local git worktrees
+.worktrees/
