@@ -57,8 +57,9 @@ else the current lookup. Local host only (structured Claude is already local-onl
 
 ## Errors (each a Notice; nothing half-created)
 
-Not paired or Orca unreachable; connection not permitted to call `repo.add`/`worktree.list`; user
-declines the add-project prompt; create refused (message from the refusal); not desktop Obsidian.
+Not paired; Orca unreachable at open (its own Notice, stored session id kept); connection not permitted to
+call `repo.add`/`worktree.list`; create refused (message from the refusal); not desktop Obsidian. The user
+declining the add-project prompt is not an error: nothing is created and no Notice is shown.
 
 ## Testing (required)
 
