@@ -1,21 +1,17 @@
 import { test, expect } from "./helpers/obsidian-fixture";
-import { agentSessionTab } from "./protocol/fake-orca-server";
+import { chatWebview, startNewSession } from "./helpers/pane";
 
-test("selecting a session mounts a webview pointed at Orca's single-session UI", async ({ server, obsidian }) => {
-	server.setSessionTabs([agentSessionTab("sess-1", "My chat")]);
+test("a new session mounts a webview pointed at Orca's single-session UI", async ({ server, obsidian, vaultPath }) => {
+	await startNewSession(obsidian, server, vaultPath);
+	const [create] = server.received("agentSession.create") as { envelope: { sessionId: string } }[];
+	const sessionId = create.envelope.sessionId;
 
-	const dropdown = obsidian.locator(".orca-chat-session-select");
-	await dropdown.focus(); // triggers the pane's onfocus refresh, which re-fetches session tabs
-	await expect(dropdown.locator('option[value="sess-1"]')).toBeAttached();
-	await dropdown.selectOption("sess-1");
-
-	const webview = obsidian.locator("webview.orca-chat-webview");
-	await expect(webview).toBeAttached();
+	const webview = chatWebview(obsidian);
 	const src = await webview.getAttribute("src");
 	const expectedOrigin = server.credential.endpoint.replace(/^ws/, "http");
 	expect(src).toMatch(new RegExp(`^${expectedOrigin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/single-session-index\\.html\\?`));
 	// "session", not "sessionId": Orca's parseSingleSessionLocation() contract (see embed-url.ts).
-	expect(src).toContain("session=sess-1");
+	expect(src).toContain(`session=${sessionId}`);
 	expect(src).toMatch(/[?&]pairing=/);
 
 	const partition = await webview.getAttribute("partition");

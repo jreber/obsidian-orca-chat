@@ -1,0 +1,60 @@
+import type { Page } from "@playwright/test";
+import { expect } from "./obsidian-fixture";
+import type { FakeOrcaServer } from "../protocol/fake-orca-server";
+
+// Where the pane's screenshots go; unset → none are written.
+export const SCREENSHOT_DIR = process.env.ORCA_CHAT_E2E_SCREENSHOT_DIR;
+
+export async function screenshotPane(obsidian: Page, name: string): Promise<void> {
+	if (!SCREENSHOT_DIR) return;
+	await obsidian.locator(".orca-chat-view").screenshot({ path: `${SCREENSHOT_DIR}/plugin-e2e-${name}.png` });
+}
+
+export async function screenshotWindow(obsidian: Page, name: string): Promise<void> {
+	if (!SCREENSHOT_DIR) return;
+	await obsidian.screenshot({ path: `${SCREENSHOT_DIR}/plugin-e2e-${name}.png` });
+}
+
+export const statusLabel = (obsidian: Page) => obsidian.locator(".orca-chat-status-label");
+export const newSessionButton = (obsidian: Page) => obsidian.locator(".orca-chat-new-session");
+export const chatWebview = (obsidian: Page) => obsidian.locator("webview.orca-chat-webview");
+
+// Registers the vault as an Orca folder project with one workspace, then clicks New session and
+// waits for the pane to mount the created session's webview.
+export async function registerVault(server: FakeOrcaServer, vaultPath: string): Promise<void> {
+	server.setRepos([{ id: "r1", path: vaultPath, kind: "folder" }]);
+	server.setWorkspaces("r1", [{ id: "ws1", path: vaultPath }]);
+}
+
+export async function startNewSession(obsidian: Page, server: FakeOrcaServer, vaultPath: string): Promise<void> {
+	await registerVault(server, vaultPath);
+	await newSessionButton(obsidian).click();
+	await expect(chatWebview(obsidian)).toBeAttached();
+}
+
+// Closes every Orca Chat pane and opens a fresh one, as a user reopening it would; the new view
+// reads the stored last-session id from the plugin's data.json.
+export async function reopenPane(obsidian: Page): Promise<void> {
+	await obsidian.evaluate(() => {
+		const win = window as unknown as {
+			app: {
+				workspace: { detachLeavesOfType: (type: string) => void };
+				commands: { executeCommandById: (id: string) => void };
+			};
+		};
+		win.app.workspace.detachLeavesOfType("orca-chat-view");
+		win.app.commands.executeCommandById("orca-chat:open-orca-chat");
+	});
+	await obsidian.waitForSelector(".orca-chat-new-session");
+}
+
+// The stored last-session id as the plugin itself reads it.
+export async function storedSessionId(obsidian: Page): Promise<string | null> {
+	return obsidian.evaluate(async () => {
+		const win = window as unknown as {
+			app: { plugins: { plugins: Record<string, { loadData: () => Promise<{ lastSessionId?: string | null } | null> }> } };
+		};
+		const data = await win.app.plugins.plugins["orca-chat"].loadData();
+		return data?.lastSessionId ?? null;
+	});
+}

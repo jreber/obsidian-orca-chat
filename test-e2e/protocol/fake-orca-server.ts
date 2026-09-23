@@ -82,6 +82,9 @@ function minimalSubmission(clientMessageId: string) {
 // failure). { html }: a 200 page, standing in for a working Orca build.
 export type EmbedPageMode = "missing" | "drop" | { html: string };
 
+export type FakeRepo = { id: string; path: string; kind?: "git" | "folder"; displayName?: string };
+export type FakeWorkspace = { id: string; path: string };
+
 interface Subscription {
 	conn: ServerConnection;
 	requestId: string;
@@ -98,6 +101,9 @@ export class FakeOrcaServer {
 	private subscriptions: Subscription[] = [];
 	private receivedCalls = new Map<string, unknown[]>();
 	private resolveSubscription: (() => void) | null = null;
+	private repos: FakeRepo[] = [];
+	private workspacesByRepo = new Map<string, FakeWorkspace[]>();
+	private createRefusal: { code: string; message: string } | null = null;
 
 	private constructor(http: Server, wss: WebSocketServer, keyPair: nacl.BoxKeyPair) {
 		this.http = http;
@@ -136,6 +142,20 @@ export class FakeOrcaServer {
 
 	setSessionTabs(tabs: AgentSessionTab[]): void {
 		this.tabs = tabs;
+	}
+
+	setRepos(repos: FakeRepo[]): void {
+		this.repos = [...repos];
+	}
+
+	setWorkspaces(repoId: string, workspaces: FakeWorkspace[]): void {
+		this.workspacesByRepo.set(repoId, [...workspaces]);
+	}
+
+	// Non-null: agentSession.create answers with this refusal (a mutation result with ok:false)
+	// instead of creating a session.
+	setCreateRefusal(refusal: { code: string; message: string } | null): void {
+		this.createRefusal = refusal;
 	}
 
 	setEmbedPage(mode: EmbedPageMode): void {
@@ -218,6 +238,46 @@ export class FakeOrcaServer {
 			case "session.tabs.listAll":
 				reply({ snapshots: [{ worktree: "", tabs: this.tabs }] });
 				return;
+			case "repo.list":
+				reply({ repos: this.repos });
+				return;
+			case "repo.add": {
+				// Like Orca: adding a folder project also gives it its one workspace (the folder itself).
+				const repo: FakeRepo = {
+					id: "repo-added",
+					path: String(params.path),
+					kind: "folder",
+					displayName: typeof params.displayName === "string" ? params.displayName : undefined,
+				};
+				this.repos.push(repo);
+				this.workspacesByRepo.set(repo.id, [{ id: "ws-added", path: repo.path }]);
+				reply({ repo });
+				return;
+			}
+			case "worktree.list": {
+				const selector = String(params.repo ?? "");
+				const repoId = selector.startsWith("id:") ? selector.slice(3) : selector;
+				const worktrees = this.workspacesByRepo.get(repoId) ?? [];
+				reply({ worktrees, totalCount: worktrees.length, truncated: false });
+				return;
+			}
+			case "agentSession.create": {
+				if (this.createRefusal) {
+					reply({ ok: false, refusal: this.createRefusal });
+					return;
+				}
+				const envelope = (params.envelope ?? {}) as { sessionId?: unknown };
+				const sessionId = String(envelope.sessionId);
+				this.tabs = [...this.tabs, agentSessionTab(sessionId, "New chat")];
+				reply({
+					ok: true,
+					replayed: false,
+					fence: 1,
+					cursor: { epoch: "e2e", sequence: 0 },
+					value: { sessionId, fence: 1, page: historyPage(sessionId, []), unconfirmedClientMessageIds: [] },
+				});
+				return;
+			}
 			case "agentSession.history": {
 				const sessionId = String(params.sessionId);
 				const page = this.historyBySession.get(sessionId) ?? historyPage(sessionId, []);

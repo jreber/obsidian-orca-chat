@@ -70,11 +70,42 @@ async function killOwnFlatpakInstance(child: ChildProcess): Promise<void> {
 	}
 }
 
-export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
+type Fixtures = {
+	server: FakeOrcaServer;
+	obsidian: Page;
+	// The temp vault copy's directory on the host.
+	vaultDir: string;
+	// The vault root exactly as Obsidian reports it (FileSystemAdapter#getBasePath) — the value the
+	// plugin sends to repo.add and matches repo.list against. Register repos on the fake with this.
+	vaultPath: string;
+	// Option: false launches with no pairedCredential in the plugin's data.json.
+	paired: boolean;
+};
+
+export const test = base.extend<Fixtures>({
+	paired: [true, { option: true }],
+
 	server: async ({}, use) => {
 		const server = await FakeOrcaServer.start();
 		await use(server);
 		await server.stop();
+	},
+
+	vaultDir: async ({}, use) => {
+		const vaultDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-vault-"));
+		try {
+			await use(vaultDir);
+		} finally {
+			rmSync(vaultDir, { recursive: true, force: true });
+		}
+	},
+
+	vaultPath: async ({ obsidian }, use) => {
+		const basePath = await obsidian.evaluate(() => {
+			const win = window as unknown as { app: { vault: { adapter: { getBasePath: () => string } } } };
+			return win.app.vault.adapter.getBasePath();
+		});
+		await use(basePath);
 	},
 
 	// Fresh vault copy + fresh Electron --user-data-dir per test: avoids colliding with the real,
@@ -106,13 +137,12 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 	// own startup routine (`ke()` in main.js) opens whichever vaults are marked `open: true` in its
 	// vault registry, which is exactly what pre-seeding the config accomplishes, with no vault-picker
 	// screen in between.
-	obsidian: async ({ server }, use) => {
-		const vaultDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-vault-"));
+	obsidian: async ({ server, vaultDir, paired }, use) => {
 		const userDataDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-userdata-"));
 		cpSync(FIXTURE_VAULT, vaultDir, { recursive: true });
 		writeFileSync(
 			path.join(vaultDir, ".obsidian", "plugins", "orca-chat", "data.json"),
-			JSON.stringify({ pairedCredential: server.credential }),
+			JSON.stringify(paired ? { pairedCredential: server.credential } : {}),
 		);
 		writeFileSync(
 			path.join(userDataDir, "obsidian.json"),
@@ -153,7 +183,10 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 				const win = window as unknown as { app: { commands: { executeCommandById: (id: string) => void } } };
 				win.app.commands.executeCommandById("orca-chat:open-orca-chat");
 			});
-			await page.waitForSelector(".orca-chat-session-select");
+			await page.waitForSelector(".orca-chat-new-session");
+			// The pane sets its status once the credential has loaded and any stored session was
+			// checked; clicking New session before that would see "not paired".
+			await page.waitForFunction(() => (document.querySelector(".orca-chat-status-label")?.textContent ?? "") !== "");
 			await use(page);
 		} finally {
 			await browser?.close().catch(() => {});
@@ -162,7 +195,6 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 				child.kill();
 				await waitForChildExit(child, 5_000);
 			}
-			rmSync(vaultDir, { recursive: true, force: true });
 			rmSync(userDataDir, { recursive: true, force: true });
 		}
 	},
