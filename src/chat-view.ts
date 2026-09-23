@@ -122,7 +122,7 @@ export async function reloadChatViewCredentials(workspace: Pick<Workspace, "getL
 	if (failed) throw failed.reason;
 }
 
-// Status texts stay short:the label ellipsizes past ~25 characters at the default sidebar width.
+// Status texts stay short: the label ellipsizes past ~25 characters at the default sidebar width.
 const NO_SESSION_STATUS = "No session yet";
 const NOT_PAIRED_STATUS = "Not paired with Orca";
 const SESSION_CHECK_INTERVAL_MS = 15_000;

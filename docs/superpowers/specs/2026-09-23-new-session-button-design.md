@@ -1,6 +1,7 @@
 # New-session button: vault-rooted Orca chat — design
 
-Date: 2026-09-23. Status: approved in conversation, pending written-spec review.
+Date: 2026-09-23. Status: implemented and verified on Linux (unit tests, fake-server Playwright, and a real
+Obsidian paired to a real Orca). Not yet exercised on macOS or Windows.
 
 ## Goal
 
@@ -90,3 +91,44 @@ declining the add-project prompt is not an error: nothing is created and no Noti
 
 Codex or other agents in the pane; SSH/WSL hosts; multi-session lists; terminal embedding for
 Copilot/OpenCode (a separate project).
+
+## Findings from the real Obsidian ↔ real Orca run
+
+- The plugin must advertise `agent-session.structured.claude.v1`. Without it Orca's `session.tabs.listAll`
+  hides Claude chat tabs from a paired client, so the pane's liveness check tore the live chat down ~15 s
+  after New session. Fixed; pinned by unit tests, a capability-faithful fake server, and the real-Orca spec.
+- Pair with Orca's **"This computer only"** link (runtime scope). A mobile-scope pairing is refused
+  `repo.add` / `worktree.list` ("not available to mobile clients"); the pairing dialog and the error Notice
+  say so.
+- Orca accepts a plain `crypto.randomUUID()` as the create session id; the plugin's create fingerprint
+  matches Orca's recomputation.
+- No startup transient: after an Orca restart the first `listAll` answer already lists the restored
+  sessions, and the pane keeps its session.
+- Creating a chat works with no `claude` on PATH when `agentCmdOverrides.claude` (absolute or `~/…`) is set.
+  Orca uses only the override's first word (arguments are ignored for chat sessions).
+
+## Known limitations and follow-ups
+
+- macOS's case-insensitive filesystem: a vault opened under a differently-cased path registers as a second
+  project (same as Orca's own comparison).
+- Orca seeds every `agentSession.create` with a short first turn so the chat appears on the Agent
+  Dashboard immediately. That applies to all clients of the create RPC (Orca's own new-chat flows and
+  mobile as well as this plugin), and a prompt sent with the chat waits behind the seed turn. If that is
+  unwanted, make the seed opt-in through an optional create field only the plugin sends.
+- If the Claude binary is missing, Orca reports "claude stream-json exited" rather than saying it was not
+  found.
+- The Windows override case and the `.cmd` wrapper are untested.
+- Rare races left as documented: re-pairing during a create can leave the pane on the previous session
+  until reopened; a hung `saveData` can hold the New session button disabled.
+
+## How to try it on macOS
+
+1. In Orca: check out `agent-dashboard-webview-fixes` (remote `personal`), install, run. In Settings set the
+   Claude command override to `~/bin/local-claude` (only the executable is used).
+2. In the plugin: check out `webview-didfail-status`, `npm install && npm run build`, copy `main.js`,
+   `manifest.json` and `styles.css` into the vault's `.obsidian/plugins/orca-chat/`, reload the plugin.
+   Commit or `git stash -u` any local edits first (a stray edit to `orca-remote-client.ts` breaks the build).
+3. In Orca use the "This computer only" pairing link; in Obsidian run **Pair with Orca** and paste it.
+4. Open the Orca Chat pane and click **New session**. Approve "Add this vault to Orca?" once.
+5. Expect: "Connecting…" then "● Live chat"; the chat visible in the pane; the vault as a project and a
+   "Claude Chat" card on Orca's Agent Dashboard. Reopening the pane reattaches to the same chat.
