@@ -689,6 +689,42 @@ test("a New session that resolves after close doesn't overwrite a session a reop
 	assert.equal(view.contentEl.querySelector("webview"), null);
 });
 
+// The stored-id write is queued behind an earlier one from the same instance; the pane closes
+// before it runs, so the write is skipped and the orphan fallback must keep the session.
+test("a New session whose stored-id write was queued and skipped by a close still stores the session", async () => {
+	const { view, plugin, storedId } = await openDesktopViewWithData({ lastSessionId: "s1" });
+	const created = deferred<{ sessionId: string }>();
+	const { client } = fakeCreateClient({
+		listAllAgentSessionTabs: async () => [], // the restore clears s1
+		createClaudeSession: () => created.promise,
+	});
+	view.setClientForTest(client);
+	const realSave = plugin.saveData.bind(plugin);
+	const heldSave = deferred<void>();
+	let saves = 0;
+	plugin.saveData = async (data: unknown) => {
+		await realSave(data);
+		if (saves++ === 0) await heldSave.promise; // the restore's clear is on disk but still pending
+	};
+	FakeNoticeLog.length = 0;
+	const restoring = view.restoreLastSession();
+	await flush();
+	assert.equal(saves, 1, "the restore's clear is mid-write");
+	assert.equal(await storedId(), null);
+	const creating = view.onNewSession(); // reads null as the stored id at click time
+	await flush();
+	created.resolve({ sessionId: "new1" }); // the pane is still open: the write queues behind the clear
+	await flush();
+	await view.onClose(); // ...and the pane closes before that write runs
+	heldSave.resolve();
+	await Promise.all([restoring, creating]);
+	await flush();
+	assert.equal(await storedId(), "new1");
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(view.contentEl.querySelector("webview"), null);
+	assert.deepEqual(FakeNoticeLog, []);
+});
+
 test("a New session that fails after the pane closed shows no Notice", async () => {
 	const view = makeDesktopView();
 	await view.onOpen();

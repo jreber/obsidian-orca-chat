@@ -463,7 +463,11 @@ export class OrcaChatView extends ItemView {
 				if (this.storedSessionOverride === expected) this.storedSessionOverride = sessionId;
 				return;
 			}
-			await compareAndSaveLastSessionId(this.plugin, expected, sessionId);
+			try {
+				await compareAndSaveLastSessionId(this.plugin, expected, sessionId);
+			} catch (err) {
+				console.error("[orca-chat] couldn't keep a session created after the pane closed", err);
+			}
 		});
 		this.storedIdWrites = write.catch(() => {});
 		return write;
