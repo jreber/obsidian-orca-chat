@@ -4,6 +4,7 @@ import { confirmAddVaultProject } from "./add-project-modal";
 import { buildSingleSessionEmbedUrl } from "./embed-url";
 import { createVaultSession, NewSessionCancelled, NewSessionError, type NewSessionClient } from "./new-session";
 import {
+	compareAndSaveLastSessionId,
 	loadLastSessionId,
 	loadPairedCredential,
 	OrcaPairingError,
@@ -270,6 +271,9 @@ export class OrcaChatView extends ItemView {
 		// The generation this click's results belong to; advanced when the new session commits.
 		let gen = this.generation;
 		try {
+			// The stored id at click time: a session created after the pane closed is kept only if
+			// nothing newer has been stored since.
+			const storedAtClick = await this.readStoredSessionId();
 			const vaultName = app.vault.getName();
 			const { sessionId } = await createVaultSession({
 				client,
@@ -280,10 +284,17 @@ export class OrcaChatView extends ItemView {
 					if (gen === this.generation) this.statusLabel.setText("Creating session…");
 				},
 			});
-			if (gen !== this.generation) return; // the pane closed meanwhile
+			if (gen !== this.generation) {
+				// The pane closed meanwhile.
+				await this.storeOrphanedSessionId(sessionId, storedAtClick);
+				return;
+			}
 			gen = ++this.generation;
-			await this.writeStoredSessionId(sessionId, gen);
-			if (gen !== this.generation) return;
+			const written = await this.writeStoredSessionId(sessionId, gen);
+			if (gen !== this.generation) {
+				if (!written) await this.storeOrphanedSessionId(sessionId, storedAtClick);
+				return;
+			}
 			this.mountSession(sessionId, "claude");
 		} catch (err) {
 			if (gen !== this.generation) return;
@@ -291,7 +302,7 @@ export class OrcaChatView extends ItemView {
 				this.statusLabel.setText(this.currentStatus());
 			} else {
 				this.reportError(err);
-				this.statusLabel.setText("⚠ Couldn't create a session");
+				this.statusLabel.setText("⚠ Session not created");
 			}
 		} finally {
 			this.busy = false;
@@ -428,14 +439,31 @@ export class OrcaChatView extends ItemView {
 	}
 
 	// Queued behind earlier writes; skipped if `gen` is no longer current when its turn comes.
-	private writeStoredSessionId(sessionId: string | null, gen: number): Promise<void> {
+	// Resolves to whether it wrote.
+	private writeStoredSessionId(sessionId: string | null, gen: number): Promise<boolean> {
 		const write = this.storedIdWrites.then(async () => {
-			if (gen !== this.generation) return;
+			if (gen !== this.generation) return false;
 			if (this.storedSessionOverride !== undefined) {
 				this.storedSessionOverride = sessionId;
-				return;
+				return true;
 			}
 			await saveLastSessionId(this.plugin, sessionId);
+			return true;
+		});
+		this.storedIdWrites = write.then(() => {}, () => {});
+		return write;
+	}
+
+	// A session created after the pane closed exists in Orca but no pane shows it (a reopened pane is
+	// a new view). Store it for the next open to restore, unless the stored id changed since the
+	// click (`expected`) — then a newer session wins. Never mounts or Notices.
+	private storeOrphanedSessionId(sessionId: string, expected: string | null): Promise<void> {
+		const write = this.storedIdWrites.then(async () => {
+			if (this.storedSessionOverride !== undefined) {
+				if (this.storedSessionOverride === expected) this.storedSessionOverride = sessionId;
+				return;
+			}
+			await compareAndSaveLastSessionId(this.plugin, expected, sessionId);
 		});
 		this.storedIdWrites = write.catch(() => {});
 		return write;

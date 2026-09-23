@@ -38,18 +38,41 @@ async function loadPluginData(plugin: Plugin): Promise<Partial<OrcaChatPluginDat
 	return ((await plugin.loadData()) as Partial<OrcaChatPluginData> | null) ?? {};
 }
 
-export async function savePairedCredential(plugin: Plugin, credential: PairedCredential): Promise<void> {
-	const data = await loadPluginData(plugin);
-	await plugin.saveData({ ...data, pairedCredential: credential } satisfies OrcaChatPluginData);
+// Serializes this module's read-modify-writes per plugin, so two of them (say, from a closed pane's
+// late create and a reopened pane) can't both load before either saves and lose one update.
+const pendingUpdates = new WeakMap<Plugin, Promise<unknown>>();
+
+function updatePluginData<T>(plugin: Plugin, update: (data: Partial<OrcaChatPluginData>) => Promise<T>): Promise<T> {
+	const run = (pendingUpdates.get(plugin) ?? Promise.resolve()).then(async () => update(await loadPluginData(plugin)));
+	pendingUpdates.set(plugin, run.catch(() => {}));
+	return run;
+}
+
+export function savePairedCredential(plugin: Plugin, credential: PairedCredential): Promise<void> {
+	return updatePluginData(plugin, async (data) => {
+		await plugin.saveData({ ...data, pairedCredential: credential } satisfies OrcaChatPluginData);
+	});
 }
 
 export async function loadLastSessionId(plugin: Plugin): Promise<string | null> {
 	return (await loadPluginData(plugin)).lastSessionId ?? null;
 }
 
-export async function saveLastSessionId(plugin: Plugin, sessionId: string | null): Promise<void> {
-	const data = await loadPluginData(plugin);
-	await plugin.saveData({ ...data, pairedCredential: data.pairedCredential ?? null, lastSessionId: sessionId } satisfies OrcaChatPluginData);
+function withLastSessionId(data: Partial<OrcaChatPluginData>, sessionId: string | null): OrcaChatPluginData {
+	return { ...data, pairedCredential: data.pairedCredential ?? null, lastSessionId: sessionId };
+}
+
+export function saveLastSessionId(plugin: Plugin, sessionId: string | null): Promise<void> {
+	return updatePluginData(plugin, (data) => plugin.saveData(withLastSessionId(data, sessionId)));
+}
+
+// Stores `next` only if the stored id is still `expected`; returns whether it did.
+export function compareAndSaveLastSessionId(plugin: Plugin, expected: string | null, next: string | null): Promise<boolean> {
+	return updatePluginData(plugin, async (data) => {
+		if ((data.lastSessionId ?? null) !== expected) return false;
+		await plugin.saveData(withLastSessionId(data, next));
+		return true;
+	});
 }
 
 export async function loadPairedCredential(plugin: Plugin): Promise<PairedCredential | null> {

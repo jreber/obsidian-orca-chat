@@ -430,7 +430,7 @@ test("New session: a failure Notices, shows the warning status and stores nothin
 	FakeNoticeLog.length = 0;
 	await view.onNewSession();
 	assert.ok(FakeNoticeLog.some((m) => /no workspace for this vault/.test(m)));
-	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "⚠ Couldn't create a session");
+	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "⚠ Session not created");
 	assert.equal(view.getStoredSessionIdForTest(), null);
 	assert.equal(view.getSelectedHandle(), null);
 });
@@ -646,6 +646,47 @@ test("a New session that resolves after the pane closed mounts nothing and shows
 	assert.equal(view.getSelectedHandle(), null);
 	assert.equal(view.contentEl.querySelector("webview"), null);
 	assert.deepEqual(FakeNoticeLog, []);
+});
+
+// A reopened pane is a new OrcaChatView, so a session created after close is kept only through
+// the stored id: persisted if nothing newer was stored since the click, for the next open to restore.
+test("a New session that resolves after the pane closed is stored for the next open, without mounting", async () => {
+	const { view, storedId } = await openDesktopViewWithData({ lastSessionId: "s0" });
+	const created = deferred<{ sessionId: string }>();
+	const { client } = fakeCreateClient({ createClaudeSession: () => created.promise });
+	view.setClientForTest(client);
+	const creating = view.onNewSession();
+	await flush();
+	await view.onClose();
+	FakeNoticeLog.length = 0;
+	created.resolve({ sessionId: "new1" });
+	await creating;
+	assert.equal(await storedId(), "new1");
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(view.contentEl.querySelector("webview"), null);
+	assert.deepEqual(FakeNoticeLog, []);
+});
+
+test("a New session that resolves after close doesn't overwrite a session a reopened pane stored", async () => {
+	const { view, plugin, storedId } = await openDesktopViewWithData({ lastSessionId: null });
+	const created = deferred<{ sessionId: string }>();
+	view.setClientForTest(fakeCreateClient({ createClaudeSession: () => created.promise }).client);
+	const creating = view.onNewSession();
+	await flush();
+	await view.onClose();
+	// The pane is reopened (a new view instance on the same plugin data) and creates new2.
+	const reopened = new OrcaChatView(new WorkspaceLeaf(), plugin);
+	await reopened.onOpen();
+	reopened.setCredentialForTest(FAKE_CREDENTIAL);
+	reopened.setClientForTest(fakeCreateClient({ createClaudeSession: async () => ({ sessionId: "new2" }) }).client);
+	await reopened.onNewSession();
+	assert.equal(await storedId(), "new2");
+	created.resolve({ sessionId: "new1" });
+	await creating;
+	await flush();
+	assert.equal(await storedId(), "new2");
+	assert.equal(reopened.getSelectedHandle(), "new2");
+	assert.equal(view.contentEl.querySelector("webview"), null);
 });
 
 test("a New session that fails after the pane closed shows no Notice", async () => {
