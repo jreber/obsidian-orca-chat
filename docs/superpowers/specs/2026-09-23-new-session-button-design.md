@@ -84,8 +84,8 @@ declining the add-project prompt is not an error: nothing is created and no Noti
   after reload; session vanished; not paired.
 - **Combined end to end:** real Obsidian with the plugin paired to a real Orca (worktree build,
   isolated data folder, stub Claude). Click New session; the same session appears in the Obsidian pane
-  and on Orca's dashboard. This also settles two open questions live: that the plugin's client may
-  call `repo.add`/`worktree.list`, and that `path:<vault>` (fallback selector) works.
+  and on Orca's dashboard. This also settles live that the plugin's client may call
+  `repo.add`/`worktree.list`. The plugin only ever sends `id:` selectors.
 - **Cannot be tested on the Linux dev machine (verify on the Mac):** macOS default paths, the real
   `~/bin/local-claude`, and case-only path differences on macOS's case-insensitive filesystem
   (`/Users/x/Vault` vs `/users/x/vault` would register twice, because POSIX paths compare in exact
