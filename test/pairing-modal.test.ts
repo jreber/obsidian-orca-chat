@@ -17,13 +17,20 @@ const { App, Plugin } = obsidianFake;
 const { PairingModal } = await import("../src/pairing-modal.ts");
 
 // A mobile-scope pairing (Orca's mobile QR) is refused repo.add / worktree.list, so New session
-// can't work with it; the modal says which link to use.
-test("the pairing modal says to use the \"This computer only\" link, under the input", () => {
+// can't work with it; the modal walks through getting the right ("This computer only") link.
+test("the pairing modal lists the four steps for getting a \"This computer only\" link, above the input", () => {
 	const modal = new PairingModal(new App(), new Plugin(new App()));
 	modal.open();
+	const steps = Array.from(modal.contentEl.querySelectorAll("ol > li")).map((li) => li.textContent);
+	assert.deepEqual(steps, [
+		"In Orca, open Settings and find \"Remote server workflow\".",
+		"Choose \"Share this host\".",
+		"Under \"Where will this link be opened?\", pick \"This computer only\" (not Orca Mobile).",
+		"Generate the link, then paste it below. Use only the newest link.",
+	]);
+	const list = modal.contentEl.querySelector("ol")!;
 	const input = modal.contentEl.querySelector("input")!;
-	const hint = input.nextElementSibling;
-	assert.equal(hint?.textContent, "Use Orca's \"This computer only\" pairing link (not the mobile QR).");
+	assert.ok(list.compareDocumentPosition(input) & 4 /* DOCUMENT_POSITION_FOLLOWING */, "steps come before the input");
 });
 
 const { encodePairingOffer } = await import("../src/orca-remote/pairing.ts");

@@ -1,6 +1,13 @@
 import { App, Modal, Notice, Plugin } from "obsidian";
 import { decodePairingUrl, savePairedCredential } from "./orca-pairing";
 
+const PAIRING_STEPS = [
+	"In Orca, open Settings and find \"Remote server workflow\".",
+	"Choose \"Share this host\".",
+	"Under \"Where will this link be opened?\", pick \"This computer only\" (not Orca Mobile).",
+	"Generate the link, then paste it below. Use only the newest link.",
+];
+
 export class PairingModal extends Modal {
 	private plugin: Plugin;
 	// Called after a successful pair, once the credential is saved (the plugin refreshes open panes).
@@ -15,13 +22,12 @@ export class PairingModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.createEl("h3", { text: "Pair with Orca" });
+		// A mobile-scope pairing can't add the vault or list its workspaces, so New session fails;
+		// these steps lead to the "This computer only" (runtime-scope) link it needs.
+		const steps = contentEl.createEl("ol", { cls: "setting-item-description" });
+		for (const step of PAIRING_STEPS) steps.createEl("li", { text: step });
 		const input = contentEl.createEl("input", { type: "text", placeholder: "Paste Orca pairing URL…" });
 		input.style.width = "100%";
-		// A mobile-scope pairing can't add the vault or list its workspaces, so New session fails.
-		contentEl.createEl("div", {
-			text: "Use Orca's \"This computer only\" pairing link (not the mobile QR).",
-			cls: "setting-item-description",
-		});
 		input.focus();
 
 		const buttonRow = contentEl.createDiv();
