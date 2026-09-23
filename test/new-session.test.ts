@@ -1,0 +1,63 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createVaultSession, NewSessionCancelled, NewSessionError, type NewSessionClient } from "../src/new-session.ts";
+
+function fakeClient(over: Partial<NewSessionClient> = {}, log: string[] = []): NewSessionClient {
+	return {
+		listRepos: async () => (log.push("listRepos"), [{ id: "r1", path: "/v", kind: "folder" as const }]),
+		addFolderRepo: async (path, name) => (log.push(`add ${path} ${name}`), { id: "r2", path, kind: "folder" as const }),
+		listWorkspaces: async (id) => (log.push(`workspaces ${id}`), [{ id: "ws-" + id, path: "/v" }]),
+		createClaudeSession: async (ws) => (log.push(`create ${ws}`), { sessionId: "sess-1" }),
+		...over,
+	};
+}
+const args = (client: NewSessionClient, confirm = async () => true) => ({
+	client, vaultPath: "/v/", vaultName: "My Vault", confirmAddProject: confirm,
+});
+
+test("registered vault: no prompt, no add, creates in its workspace", async () => {
+	const log: string[] = [];
+	let prompted = false;
+	const out = await createVaultSession(args(fakeClient({}, log), async () => ((prompted = true), true)));
+	assert.deepEqual(out, { sessionId: "sess-1" });
+	assert.equal(prompted, false);
+	assert.deepEqual(log, ["listRepos", "workspaces r1", "create ws-r1"]);
+});
+
+test("unregistered vault: asks once, adds as folder project, then creates", async () => {
+	const log: string[] = [];
+	const client = fakeClient({ listRepos: async () => (log.push("listRepos"), []) }, log);
+	const out = await createVaultSession(args(client));
+	assert.equal(out.sessionId, "sess-1");
+	assert.deepEqual(log, ["listRepos", "add /v/ My Vault", "workspaces r2", "create ws-r2"]);
+});
+
+test("declining the add-project prompt creates nothing", async () => {
+	const log: string[] = [];
+	const client = fakeClient({ listRepos: async () => (log.push("listRepos"), []) }, log);
+	await assert.rejects(createVaultSession(args(client, async () => false)), NewSessionCancelled);
+	assert.deepEqual(log, ["listRepos"]);
+});
+
+test("a project with no workspace is a clear error and creates nothing", async () => {
+	const log: string[] = [];
+	const client = fakeClient({ listWorkspaces: async () => [] }, log);
+	await assert.rejects(createVaultSession(args(client)), (e: unknown) => e instanceof NewSessionError && /workspace/i.test((e as Error).message));
+	assert.ok(!log.some((l) => l.startsWith("create")));
+});
+
+test("prefers the workspace whose path is the vault root when several exist", async () => {
+	const log: string[] = [];
+	const client = fakeClient({
+		listWorkspaces: async () => [{ id: "other", path: "/elsewhere" }, { id: "root", path: "/v" }],
+	}, log);
+	await createVaultSession(args(client));
+	assert.ok(log.includes("create root"));
+});
+
+test("listRepos failure propagates and nothing is added or created", async () => {
+	const log: string[] = [];
+	const client = fakeClient({ listRepos: async () => { throw new Error("offline"); } }, log);
+	await assert.rejects(createVaultSession(args(client)), /offline/);
+	assert.deepEqual(log, []);
+});
