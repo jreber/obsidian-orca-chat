@@ -28,3 +28,31 @@ test("listAllAgentSessionTabs sees its Claude session on a host that gates Claud
 		await server.stop();
 	}
 });
+
+// The agent-session calls the pane makes must each advertise both capabilities: Orca refuses
+// agentSession.create without the structured one, and hides Claude tabs from listAll without the
+// Claude one. (The transport adds its own baseline capabilities to every call; project calls such as
+// repo.list and worktree.list aren't gated on these.)
+test("createClaudeSession and listAllAgentSessionTabs send both structured capabilities", async () => {
+	const server = await FakeOrcaServer.start();
+	try {
+		server.setRepos([{ id: "r1", path: "/v", kind: "folder" }]);
+		server.setWorkspaces("r1", [{ id: "ws-1", path: "/v" }]);
+		const client = new OrcaRemoteClient();
+		await client.connect(server.credential);
+		await client.listRepos();
+		await client.listWorkspaces("r1");
+		const { sessionId } = await client.createClaudeSession("ws-1");
+		await client.listAllAgentSessionTabs();
+		assert.ok(sessionId);
+		for (const method of ["agentSession.create", "session.tabs.listAll"]) {
+			const sent = server.receivedCapabilities(method);
+			assert.equal(sent.length, 1, method);
+			for (const capability of STRUCTURED_AGENT_SESSION_CAPABILITIES) {
+				assert.ok(sent[0].includes(capability), `${method} lacks ${capability}`);
+			}
+		}
+	} finally {
+		await server.stop();
+	}
+});

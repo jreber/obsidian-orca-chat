@@ -119,6 +119,7 @@ export class FakeOrcaServer {
 	private historyBySession = new Map<string, AgentSessionHistoryPage>();
 	private subscriptions: Subscription[] = [];
 	private receivedCalls = new Map<string, unknown[]>();
+	private receivedCapabilityLists = new Map<string, (readonly string[])[]>();
 	private resolveSubscription: (() => void) | null = null;
 	private repos: FakeRepo[] = [];
 	private workspacesByRepo = new Map<string, FakeWorkspace[]>();
@@ -211,6 +212,11 @@ export class FakeOrcaServer {
 		return this.receivedCalls.get(method) ?? [];
 	}
 
+	// The capability list the client advertised on each call to `method`, in call order.
+	receivedCapabilities(method: string): (readonly string[])[] {
+		return this.receivedCapabilityLists.get(method) ?? [];
+	}
+
 	async stop(): Promise<void> {
 		for (const client of this.wss.clients) client.terminate();
 		await new Promise<void>((resolve, reject) => this.wss.close((err) => (err ? reject(err) : resolve())));
@@ -242,6 +248,9 @@ export class FakeOrcaServer {
 			const calls = this.receivedCalls.get(method) ?? [];
 			calls.push(request.params);
 			this.receivedCalls.set(method, calls);
+			const capabilityLists = this.receivedCapabilityLists.get(method) ?? [];
+			capabilityLists.push([...conn.clientCapabilities]);
+			this.receivedCapabilityLists.set(method, capabilityLists);
 			this.handleRpc(conn, request);
 		});
 	}
@@ -281,6 +290,12 @@ export class FakeOrcaServer {
 				return;
 			}
 			case "agentSession.create": {
+				// Like Orca's requireStructuredCapability: without it, the structured session surface
+				// doesn't exist for this client.
+				if (!conn.clientCapabilities.includes(STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY)) {
+					fail("structured_agent_session_unsupported", "structured_agent_session_unsupported");
+					return;
+				}
 				if (this.createRefusal) {
 					reply({ ok: false, refusal: this.createRefusal });
 					return;

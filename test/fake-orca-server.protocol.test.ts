@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { sendRemoteRuntimeRequest } from "../src/orca-remote/remote-runtime-client.ts";
 import { FakeOrcaServer, agentSessionTab, historyPage, textMessageItem } from "../test-e2e/protocol/fake-orca-server.ts";
-import { OrcaRemoteClient } from "../src/orca-remote-client.ts";
+import { buildCreateEnvelope, OrcaRemoteClient } from "../src/orca-remote-client.ts";
 import {
 	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
 	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
@@ -133,6 +133,30 @@ test("pushHistoryEvent delivers a batch to an open subscription", async () => {
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		unsubscribe();
 		assert.deepEqual(events, [batchEvent]);
+	} finally {
+		await server.stop();
+	}
+});
+
+// Real Orca's agentSession.create calls requireStructuredCapability first: a client that didn't
+// advertise agent-session.structured.v1 gets the RPC error structured_agent_session_unsupported.
+test("agentSession.create is refused without the structured capability, like Orca", async () => {
+	const server = await FakeOrcaServer.start();
+	try {
+		const params = { envelope: buildCreateEnvelope("sess-x", "id:ws-1", "claude"), worktree: "id:ws-1", agent: "claude" };
+		const bare = await sendRemoteRuntimeRequest(server.credential, "agentSession.create", params, 5000);
+		assert.equal(bare.ok, false);
+		if (!bare.ok) assert.equal(bare.error.code, "structured_agent_session_unsupported");
+		const capable = await sendRemoteRuntimeRequest(
+			server.credential,
+			"agentSession.create",
+			params,
+			5000,
+			undefined,
+			undefined,
+			[STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY],
+		);
+		assert.equal(capable.ok, true);
 	} finally {
 		await server.stop();
 	}
