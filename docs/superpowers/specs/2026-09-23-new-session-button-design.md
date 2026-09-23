@@ -42,7 +42,13 @@ respect (tab in Orca, Agent Dashboard card, history), and the pane embeds it exa
    an envelope with `expectedRuntimeFence: null` and the create fingerprint
    (`{method:'agentSession.create', sessionId, fields:{worktree, agent, resumeFrom}}`), mirroring
    Orca's `structured-agent-session.ts`. The existing `buildMutationEnvelope` reads a fence from
-   history and cannot be reused for create.
+   history and cannot be reused for create. Create has a 30 s timeout (reads keep 10 s): a cold first
+   create installs and starts Orca's session host. If the outcome is lost (a timeout, a dropped
+   connection, or Orca's `agent_session_operation_unknown` refusal), the plugin sends the same
+   envelope again, which Orca's operation ledger answers as a replay, and failing that looks the
+   session id up in `session.tabs.listAll`. A session found either way is attached as a normal
+   success, so a slow create never leaves an orphaned chat in Orca; only if neither finds it does the
+   pane show "⚠ Session not created".
 6. Persist `lastSessionId` in the vault's `data.json` (beside `pairedCredential`). Mount the embed.
    Orca's seed-turn fix means the session appears on the Agent Dashboard immediately.
 
