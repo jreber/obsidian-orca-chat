@@ -68,3 +68,20 @@ test("compare-and-save can't interleave with another write to the same data", as
 	assert.equal(swapped, false);
 	assert.equal(await loadLastSessionId(plugin as never), "newer");
 });
+
+test("loading the session id waits for a write already queued, so it never reads a stale id", async () => {
+	const plugin = new Plugin(new App());
+	await saveLastSessionId(plugin as never, "old");
+	const realSave = plugin.saveData.bind(plugin);
+	let release!: () => void;
+	const held = new Promise<void>((r) => (release = r));
+	plugin.saveData = async (data: unknown) => {
+		await held;
+		return realSave(data);
+	};
+	const saving = saveLastSessionId(plugin as never, "new");
+	const loading = loadLastSessionId(plugin as never);
+	release();
+	await saving;
+	assert.equal(await loading, "new");
+});

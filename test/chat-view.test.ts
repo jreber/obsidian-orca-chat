@@ -829,3 +829,216 @@ test("restore with no client (unpaired or connect failed) keeps the stored id", 
 	assert.equal(view.getSelectedHandle(), null);
 	assert.equal(statusText(view), "Can't reach Orca");
 });
+
+// --- A restore that couldn't reach Orca is retried (final review I1) ---
+
+// listAll fails `failures` times, then lists `tabs`.
+function flakyList(failures: number, tabs: unknown[]) {
+	let calls = 0;
+	const listAllAgentSessionTabs = async () => {
+		calls++;
+		if (calls <= failures) throw new OrcaRemoteError("connect ECONNREFUSED");
+		return tabs;
+	};
+	return { listAllAgentSessionTabs, calls: () => calls };
+}
+
+test("a restore that couldn't reach Orca is retried by the liveness tick and mounts once Orca answers", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const list = flakyList(2, [{ sessionId: "s1", agent: "claude", title: "t" }]);
+	view.setClientForTest({ listAllAgentSessionTabs: list.listAllAgentSessionTabs, disconnect: () => {} });
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(statusText(view), "Can't reach Orca");
+	FakeNoticeLog.length = 0;
+	await view.checkCurrentSession(); // Orca still down
+	assert.equal(list.calls(), 2);
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	assert.deepEqual(FakeNoticeLog, [], "a failed retry is quiet");
+	await view.checkCurrentSession(); // Orca is up
+	assert.equal(view.getSelectedHandle(), "s1");
+	assert.ok(view.contentEl.querySelector("webview.orca-chat-webview"));
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+});
+
+test("the liveness tick stops retrying once a restore gets a definitive answer", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const list = flakyList(1, []);
+	view.setClientForTest({ listAllAgentSessionTabs: list.listAllAgentSessionTabs, disconnect: () => {} });
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	await view.checkCurrentSession(); // s1 is gone: cleared
+	assert.equal(view.getStoredSessionIdForTest(), null);
+	await view.checkCurrentSession();
+	await view.checkCurrentSession();
+	assert.equal(list.calls(), 2);
+});
+
+test("the liveness tick does not retry a restore that succeeded", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const list = flakyList(0, []);
+	view.setClientForTest({ listAllAgentSessionTabs: list.listAllAgentSessionTabs, disconnect: () => {} });
+	view.setStoredSessionIdForTest(null);
+	await view.restoreLastSession();
+	await view.checkCurrentSession();
+	assert.equal(list.calls(), 0);
+});
+
+test("New session while a restore is pending reattaches a live stored session instead of creating one", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const list = flakyList(1, [{ sessionId: "s1", agent: "claude", title: "t" }]);
+	const { client, calls } = fakeCreateClient({ listAllAgentSessionTabs: list.listAllAgentSessionTabs });
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(view.getSelectedHandle(), null);
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.deepEqual(calls, []);
+	assert.equal(view.getSelectedHandle(), "s1");
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	assert.deepEqual(FakeNoticeLog, ["Orca Chat: reattached your previous session"]);
+	assert.equal((view.contentEl.querySelector(".orca-chat-new-session") as HTMLButtonElement).disabled, false);
+	// ...and the next click creates normally.
+	await view.onNewSession();
+	assert.ok(calls.includes("createClaudeSession"));
+	assert.equal(view.getSelectedHandle(), "new1");
+});
+
+test("New session while a restore is pending and Orca still unreachable runs the create path and surfaces its error", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const list = flakyList(99, []);
+	const { client, calls } = fakeCreateClient({
+		listAllAgentSessionTabs: list.listAllAgentSessionTabs,
+		listRepos: async () => {
+			calls.push("listRepos");
+			throw new OrcaRemoteError("connect ECONNREFUSED");
+		},
+	});
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.equal(list.calls(), 2, "the restore was tried again first");
+	assert.deepEqual(calls, ["listRepos"]);
+	assert.deepEqual(FakeNoticeLog, ["connect ECONNREFUSED"]);
+	assert.equal(statusText(view), "⚠ Session not created");
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	// Still pending: the tick keeps trying.
+	await view.checkCurrentSession();
+	assert.equal(list.calls(), 3);
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+});
+
+test("New session while a restore is pending and the stored session is gone creates a new one", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const list = flakyList(1, []);
+	const { client, calls } = fakeCreateClient({ listAllAgentSessionTabs: list.listAllAgentSessionTabs });
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.ok(calls.includes("createClaudeSession"));
+	assert.equal(view.getSelectedHandle(), "new1");
+	assert.equal(view.getStoredSessionIdForTest(), "new1");
+	assert.deepEqual(FakeNoticeLog, []);
+});
+
+// --- Stored-id clears only clear the id they found dead (final review M1) ---
+
+// Pane A clicks New session with Z stored and closes; the reopened pane B's slow restore reads Z;
+// A's late session X is stored (Z still stored); B's list then says Z is gone. B must not erase X.
+test("a slow restore that read a dead id doesn't erase a session stored after it read", async () => {
+	const { view: paneA, plugin, storedId } = await openDesktopViewWithData({ lastSessionId: "Z" });
+	const created = deferred<{ sessionId: string }>();
+	paneA.setClientForTest(fakeCreateClient({ createClaudeSession: () => created.promise }).client);
+	const creating = paneA.onNewSession();
+	await flush();
+	await paneA.onClose();
+	const paneB = new OrcaChatView(new WorkspaceLeaf(), plugin);
+	await paneB.onOpen();
+	paneB.setCredentialForTest(FAKE_CREDENTIAL);
+	const listed = deferred<unknown[]>();
+	paneB.setClientForTest({ listAllAgentSessionTabs: () => listed.promise, disconnect: () => {} });
+	const restoring = paneB.restoreLastSession();
+	await flush(); // B has read Z and is listing
+	created.resolve({ sessionId: "X" });
+	await creating;
+	await flush();
+	assert.equal(await storedId(), "X");
+	listed.resolve([]); // Z is gone
+	await restoring;
+	await flush();
+	assert.equal(await storedId(), "X");
+});
+
+// The other order: B clears the dead Z first, then A's late X arrives. X is kept (nothing newer).
+test("a session created after close is kept when the stored id was cleared meanwhile", async () => {
+	const { view: paneA, plugin, storedId } = await openDesktopViewWithData({ lastSessionId: "Z" });
+	const created = deferred<{ sessionId: string }>();
+	paneA.setClientForTest(fakeCreateClient({ createClaudeSession: () => created.promise }).client);
+	const creating = paneA.onNewSession();
+	await flush();
+	await paneA.onClose();
+	const paneB = new OrcaChatView(new WorkspaceLeaf(), plugin);
+	await paneB.onOpen();
+	paneB.setCredentialForTest(FAKE_CREDENTIAL);
+	paneB.setClientForTest({ listAllAgentSessionTabs: async () => [], disconnect: () => {} });
+	await paneB.restoreLastSession();
+	await flush();
+	assert.equal(await storedId(), null);
+	created.resolve({ sessionId: "X" });
+	await creating;
+	await flush();
+	assert.equal(await storedId(), "X");
+});
+
+test("the liveness check's clear doesn't erase an id stored after the session was mounted", async () => {
+	const { view, plugin, storedId } = await openDesktopViewWithData({ lastSessionId: "s1" });
+	let listAll = async () => [{ sessionId: "s1", agent: "claude", title: "t" }] as unknown[];
+	view.setClientForTest({ listAllAgentSessionTabs: () => listAll(), disconnect: () => {} });
+	await view.restoreLastSession();
+	assert.equal(view.getSelectedHandle(), "s1");
+	listAll = async () => [];
+	await plugin.saveData({ ...((await plugin.loadData()) as object), lastSessionId: "other" }); // e.g. another pane
+	await view.checkCurrentSession();
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(await storedId(), "other");
+});
+
+// --- A failed stored-id write after Orca created the session (final review M2) ---
+
+test("New session: a stored-id write failure still mounts the created chat and says it won't be remembered", async () => {
+	const { view, plugin } = await openDesktopViewWithData({ lastSessionId: null });
+	view.setClientForTest(fakeCreateClient().client);
+	plugin.saveData = async () => {
+		throw new Error("disk full");
+	};
+	FakeNoticeLog.length = 0;
+	const originalError = console.error;
+	console.error = () => {};
+	try {
+		await view.onNewSession();
+	} finally {
+		console.error = originalError;
+	}
+	assert.equal(view.getSelectedHandle(), "new1");
+	assert.ok(view.contentEl.querySelector("webview.orca-chat-webview"));
+	assert.equal(statusText(view), "Connecting…");
+	assert.deepEqual(FakeNoticeLog, ["Orca Chat: chat created, but this pane couldn't remember it after a restart"]);
+});

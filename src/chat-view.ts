@@ -15,6 +15,7 @@ import {
 	loadPairedCredential,
 	OrcaPairingError,
 	saveLastSessionId,
+	saveLastSessionIdIf,
 	type PairedCredential,
 } from "./orca-pairing";
 import { OrcaRemoteClient, OrcaRemoteError, type StructuredSessionTab } from "./orca-remote-client";
@@ -135,6 +136,10 @@ export class OrcaChatView extends ItemView {
 	// Stored-id writes are serialized (saveLastSessionId is a read-modify-write) and each is dropped
 	// if its generation went stale while it waited, so a late clear can't overwrite a newer id.
 	private storedIdWrites: Promise<void> = Promise.resolve();
+	// The last restore couldn't reach Orca, so whether the stored session is still live is unknown.
+	// The liveness tick and the next New session click try the restore again; cleared once a restore
+	// gets an answer or a session is mounted.
+	private restorePending = false;
 
 	private readonly plugin: Plugin;
 	private credential: PairedCredential | null = null;
@@ -189,6 +194,7 @@ export class OrcaChatView extends ItemView {
 		this.remoteClient = null;
 		this.credential = null;
 		this.currentSessionId = null;
+		this.restorePending = false;
 	}
 
 	private async initializeRemote(): Promise<void> {
@@ -216,13 +222,16 @@ export class OrcaChatView extends ItemView {
 		await this.restoreLastSession();
 	}
 
-	// Public for tests. Reattaches to the vault's last session if Orca still has it.
-	async restoreLastSession(): Promise<void> {
+	// Public for tests. Reattaches to the vault's last session if Orca still has it. A retry (the
+	// liveness tick, or a New session click) doesn't repeat the "can't reach Orca" Notice; nor is
+	// "previous session ended" announced while a New session is underway.
+	async restoreLastSession(retry = false): Promise<void> {
 		const gen = this.generation;
 		const id = await this.readStoredSessionId();
 		if (gen !== this.generation) return;
 		if (!id) {
-			this.statusLabel.setText(NO_SESSION_STATUS);
+			this.restorePending = false;
+			if (!this.currentSessionId) this.statusLabel.setText(NO_SESSION_STATUS);
 			return;
 		}
 		if (!this.remoteClient) {
@@ -234,21 +243,24 @@ export class OrcaChatView extends ItemView {
 		try {
 			tabs = await this.remoteClient.listAllAgentSessionTabs();
 		} catch (err) {
-			if (gen !== this.generation) return;
-			this.reportError(err);
+			if (gen !== this.generation || this.currentSessionId) return;
+			// Keep the stored id, and try again later.
+			this.restorePending = true;
+			if (!retry) this.reportError(err, (message) => `Orca Chat: ${message}`);
 			this.statusLabel.setText("Can't reach Orca");
-			return; // keep the stored id
+			return;
 		}
 		// A New session that finished (or the pane closing) while the list was in flight wins.
 		if (gen !== this.generation || this.currentSessionId) return;
+		this.restorePending = false;
 		const tab = tabs.find((t) => t.sessionId === id);
 		if (tab) {
 			this.mountSession(id, tab.agent);
 			return;
 		}
-		await this.writeStoredSessionId(null, gen);
+		await this.clearStoredSessionIdIf(id, gen);
 		if (gen !== this.generation || this.currentSessionId) return;
-		new Notice("Orca Chat: previous session ended — click New session");
+		if (!this.busy) new Notice("Orca Chat: previous session ended — click New session");
 		this.statusLabel.setText(NO_SESSION_STATUS);
 	}
 
@@ -268,8 +280,8 @@ export class OrcaChatView extends ItemView {
 		}
 		const client = this.remoteClient;
 		if (!client) {
-			// Paired, but the connection at open failed.
-			new Notice("Orca Chat: can't reach Orca — is it running? Reopen the pane to retry");
+			// Paired but no client: only while the pane is still initializing (connect can't fail).
+			new Notice("Orca Chat: can't reach Orca — is it running?");
 			return;
 		}
 		this.busy = true;
@@ -277,6 +289,16 @@ export class OrcaChatView extends ItemView {
 		// The generation this click's results belong to; advanced when the new session commits.
 		let gen = this.generation;
 		try {
+			// Orca was unreachable when the pane last tried to reattach: if the stored session turns
+			// out to be live, reattach it rather than create another and lose track of it.
+			if (this.restorePending) {
+				await this.restoreLastSession(true);
+				if (gen !== this.generation) return;
+				if (this.currentSessionId) {
+					new Notice("Orca Chat: reattached your previous session");
+					return;
+				}
+			}
 			// The stored id at click time: a session created after the pane closed is kept only if
 			// nothing newer has been stored since.
 			const storedAtClick = await this.readStoredSessionId();
@@ -296,7 +318,17 @@ export class OrcaChatView extends ItemView {
 				return;
 			}
 			gen = ++this.generation;
-			const written = await this.writeStoredSessionId(sessionId, gen);
+			let written: boolean;
+			try {
+				written = await this.writeStoredSessionId(sessionId, gen);
+			} catch (err) {
+				// Orca has the chat; only remembering it across a restart failed. Show it anyway.
+				console.error("[orca-chat] couldn't store the new session id", err);
+				if (gen !== this.generation) return;
+				this.mountSession(sessionId, "claude");
+				new Notice("Orca Chat: chat created, but this pane couldn't remember it after a restart");
+				return;
+			}
 			if (gen !== this.generation) {
 				if (!written) await this.storeOrphanedSessionId(sessionId, storedAtClick);
 				return;
@@ -322,7 +354,13 @@ export class OrcaChatView extends ItemView {
 	async checkCurrentSession(): Promise<void> {
 		const gen = this.generation;
 		const sessionId = this.currentSessionId;
-		if (!sessionId || !this.remoteClient) return;
+		if (!this.remoteClient) return;
+		if (!sessionId) {
+			// Nothing mounted: retry a restore that couldn't reach Orca (not while a New session runs,
+			// which retries it itself).
+			if (this.restorePending && !this.busy) await this.restoreLastSession(true);
+			return;
+		}
 		let tabs: StructuredSessionTab[];
 		try {
 			tabs = await this.remoteClient.listAllAgentSessionTabs();
@@ -335,7 +373,7 @@ export class OrcaChatView extends ItemView {
 		if (tabs.some((t) => t.sessionId === sessionId)) return;
 		this.teardownWebview();
 		this.currentSessionId = null;
-		await this.writeStoredSessionId(null, gen);
+		await this.clearStoredSessionIdIf(sessionId, gen);
 		if (gen !== this.generation) return;
 		new Notice("Orca Chat: session ended — click New session");
 		this.statusLabel.setText(NO_SESSION_STATUS);
@@ -421,6 +459,7 @@ export class OrcaChatView extends ItemView {
 		this.embedContainer.appendChild(webview);
 		this.currentWebview = webview;
 		this.currentSessionId = sessionId;
+		this.restorePending = false;
 		this.embedLoadState = "loading";
 		this.statusLabel.setText(this.currentStatus());
 	}
@@ -460,17 +499,35 @@ export class OrcaChatView extends ItemView {
 		return write;
 	}
 
+	// Clears the stored id only if it is still `deadId`, the one found gone: an id stored since (say,
+	// a session a closed pane created late) is newer and stays. Queued like writeStoredSessionId.
+	private clearStoredSessionIdIf(deadId: string, gen: number): Promise<boolean> {
+		const write = this.storedIdWrites.then(async () => {
+			if (gen !== this.generation) return false;
+			if (this.storedSessionOverride !== undefined) {
+				if (this.storedSessionOverride !== deadId) return false;
+				this.storedSessionOverride = null;
+				return true;
+			}
+			return compareAndSaveLastSessionId(this.plugin, deadId, null);
+		});
+		this.storedIdWrites = write.then(() => {}, () => {});
+		return write;
+	}
+
 	// A session created after the pane closed exists in Orca but no pane shows it (a reopened pane is
-	// a new view). Store it for the next open to restore, unless the stored id changed since the
-	// click (`expected`) — then a newer session wins. Never mounts or Notices.
+	// a new view). Store it for the next open to restore if the stored id is still the one at click
+	// time (`expected`) or was cleared since; a different id stored since is a newer session and
+	// wins. Never mounts or Notices.
 	private storeOrphanedSessionId(sessionId: string, expected: string | null): Promise<void> {
+		const accept = (stored: string | null) => stored === expected || stored === null;
 		const write = this.storedIdWrites.then(async () => {
 			if (this.storedSessionOverride !== undefined) {
-				if (this.storedSessionOverride === expected) this.storedSessionOverride = sessionId;
+				if (accept(this.storedSessionOverride)) this.storedSessionOverride = sessionId;
 				return;
 			}
 			try {
-				await compareAndSaveLastSessionId(this.plugin, expected, sessionId);
+				await saveLastSessionIdIf(this.plugin, accept, sessionId);
 			} catch (err) {
 				console.error("[orca-chat] couldn't keep a session created after the pane closed", err);
 			}

@@ -54,8 +54,9 @@ export function savePairedCredential(plugin: Plugin, credential: PairedCredentia
 	});
 }
 
-export async function loadLastSessionId(plugin: Plugin): Promise<string | null> {
-	return (await loadPluginData(plugin)).lastSessionId ?? null;
+// Queued behind any pending write, so a read never sees an id that a write already started replacing.
+export function loadLastSessionId(plugin: Plugin): Promise<string | null> {
+	return updatePluginData(plugin, async (data) => data.lastSessionId ?? null);
 }
 
 function withLastSessionId(data: Partial<OrcaChatPluginData>, sessionId: string | null): OrcaChatPluginData {
@@ -66,13 +67,22 @@ export function saveLastSessionId(plugin: Plugin, sessionId: string | null): Pro
 	return updatePluginData(plugin, (data) => plugin.saveData(withLastSessionId(data, sessionId)));
 }
 
-// Stores `next` only if the stored id is still `expected`; returns whether it did.
-export function compareAndSaveLastSessionId(plugin: Plugin, expected: string | null, next: string | null): Promise<boolean> {
+// Stores `next` only if `accept` approves the stored id at write time; returns whether it did.
+export function saveLastSessionIdIf(
+	plugin: Plugin,
+	accept: (stored: string | null) => boolean,
+	next: string | null,
+): Promise<boolean> {
 	return updatePluginData(plugin, async (data) => {
-		if ((data.lastSessionId ?? null) !== expected) return false;
+		if (!accept(data.lastSessionId ?? null)) return false;
 		await plugin.saveData(withLastSessionId(data, next));
 		return true;
 	});
+}
+
+// Stores `next` only if the stored id is still `expected`; returns whether it did.
+export function compareAndSaveLastSessionId(plugin: Plugin, expected: string | null, next: string | null): Promise<boolean> {
+	return saveLastSessionIdIf(plugin, (stored) => stored === expected, next);
 }
 
 export async function loadPairedCredential(plugin: Plugin): Promise<PairedCredential | null> {
