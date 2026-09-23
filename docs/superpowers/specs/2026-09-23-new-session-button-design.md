@@ -107,6 +107,55 @@ Copilot/OpenCode (a separate project).
 - Creating a chat works with no `claude` on PATH when `agentCmdOverrides.claude` (absolute or `~/…`) is set.
   Orca uses only the override's first word (arguments are ignored for chat sessions).
 
+## Wikilinks in chat
+
+**Finding (verified against the real Orca build):** Orca's chat markdown renderer drops link schemes
+it doesn't know (react-markdown's `defaultUrlTransform`), so an `obsidian://…` link in the agent's
+output renders with an empty href and the pane's obsidian:// click interception never fires for it.
+It also doesn't parse `[[wikilinks]]`: they render as literal text `[[Note]]`.
+
+**Design (Option A):** the agent writes ordinary wikilinks; the pane makes them work.
+
+- On `dom-ready` the pane injects a second script into the guest (`src/wikilinks.ts`, beside the
+  obsidian:// interceptor, same `executeJavaScript` in / `console-message` out channel, guarded by a
+  window flag). It links `[[target]]`, `[[target#heading]]`, `[[target|alias]]` and
+  `[[target#heading|alias]]` found in text nodes, on load and via a MutationObserver as messages
+  stream in. It skips `pre`, `code`, existing links, `script`/`style`, form fields and editable
+  areas (the composer). Anchors are built with DOM APIs, never `innerHTML`. A text node the page
+  re-renders or removes takes the anchors made from it along, so React stays in charge of its nodes,
+  and an unclosed `[[Note` isn't linked until `]]` arrives.
+- The guest reports each distinct target once (`orca-chat:wikilink-check:`, at most 200 per
+  message). The host resolves them with `metadataCache.getFirstLinkpathDest` and has the guest mark
+  the missing ones (faded, dotted underline, "Note not found in this vault").
+- A click reports `orca-chat:wikilink-open:{"link":…}`. The page is agent-influenced, so the host
+  validates it strictly (JSON, a string of at most 512 characters, no control characters). It then
+  opens the note only if it exists in the vault, in the most recent main-area leaf, or a new tab when
+  that leaf is the chat. It never opens a note in the chat's own leaf (a click in the webview makes
+  that leaf active) and never creates a note. A missing note gets a Notice
+  (`no note named "…" in this vault`).
+- Tests: jsdom unit tests of the guest script and the host core; a fake-server Playwright spec; and
+  the real-Orca spec, where the stub Claude answers with `See [[Welcome]] and [[Missing note]].`
+  (Orca's `CLAUDE_STUB_REPLY`, added for this) and both are checked in the real transcript.
+
+## Guidance for the agent: AGENTS.md in the vault
+
+The chat session's working folder is the vault root, so standing guidance belongs in the vault's
+`AGENTS.md` (Claude Code reads `CLAUDE.md`, which needs a line `@AGENTS.md`). Files in the Orca or
+plugin repos are never read by the agent. The command **Add chat guidelines to AGENTS.md** writes a
+block between `<!-- orca-chat:guidelines:start -->` and `<!-- orca-chat:guidelines:end -->`: be brief,
+link notes as wikilinks that exist in this vault, not inside code. It creates the file, appends after
+a blank line in the file's own line endings, or does nothing when the block is there, and never
+changes text outside the markers or touches `CLAUDE.md` (the Notice advises adding `@AGENTS.md`).
+See [docs/vault-agents-guidance.md](../../vault-agents-guidance.md).
+
+## Versioning
+
+Obsidian requires a plain `x.y.z` in `manifest.json`, so a git hash can't be the version. The plugin is
+0.2.0 (`manifest.json`, `package.json`, `package-lock.json`); `versions.json` maps each version to its
+`minAppVersion`. The build defines `__ORCA_CHAT_BUILD__` as the short git hash (`-dirty` when tracked
+files have uncommitted changes, `unknown` without git), and `versionLabel()`
+(`Orca Chat v0.2.0 (abc1234)`) is logged on load and shown under the Pair button in Pair with Orca.
+
 ## Known limitations and follow-ups
 
 - macOS's case-insensitive filesystem: a vault opened under a differently-cased path registers as a second
@@ -118,6 +167,9 @@ Copilot/OpenCode (a separate project).
 - If the Claude binary is missing, Orca reports "claude stream-json exited" rather than saying it was not
   found.
 - The Windows override case and the `.cmd` wrapper are untested.
+- `obsidian://` links in chat output are not clickable (Orca strips the href); agents should use
+  wikilinks. A wikilink split across several text nodes by the renderer would not be linked (not seen
+  with Orca's current renderer).
 - Rare races left as documented: re-pairing during a create can leave the pane on the previous session
   until reopened; a hung `saveData` can hold the New session button disabled.
 
@@ -132,3 +184,7 @@ Copilot/OpenCode (a separate project).
 4. Open the Orca Chat pane and click **New session**. Approve "Add this vault to Orca?" once.
 5. Expect: "Connecting…" then "● Live chat"; the chat visible in the pane; the vault as a project and a
    "Claude Chat" card on Orca's Agent Dashboard. Reopening the pane reattaches to the same chat.
+6. Optional: run **Add chat guidelines to AGENTS.md** and add a line `@AGENTS.md` to the vault's
+   `CLAUDE.md`, so new chats link notes as clickable `[[wikilinks]]`. See
+   [docs/vault-agents-guidance.md](../../vault-agents-guidance.md). The Pair with Orca dialog's footer
+   shows the installed version and build (`Orca Chat v0.2.0 (<hash>)`).
