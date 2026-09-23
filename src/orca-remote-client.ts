@@ -9,6 +9,7 @@ import {
 } from "./orca-remote/remote-runtime-client";
 import type { RuntimeRpcResponse } from "./orca-remote/runtime-rpc-envelope";
 import type { PairedCredential } from "./orca-pairing";
+import type { OrcaRepoSummary } from "./vault-project";
 
 // Every agentSession.* method (and the session.tabs.* projection of an
 // agent-session tab) is gated on this capability — see
@@ -512,6 +513,21 @@ export type AgentSessionMutationResult<TValue> =
 	| { ok: true; replayed: boolean; fence: number; cursor: AgentJournalCursor; value: TValue }
 	| { ok: false; refusal: AgentSessionWireRefusal };
 
+export function buildCreateEnvelope(sessionId: string, worktree: string, agent: "claude"): AgentSessionMutationEnvelope {
+	return {
+		sessionId,
+		// Same ledger shape as buildMutationEnvelope: 13-digit ms timestamp + 32 hex chars.
+		clientOperationId: `${Date.now()}-${crypto.randomUUID().replace(/-/g, "")}`,
+		// Create is the one mutation that must NOT fence: the session does not exist yet.
+		expectedRuntimeFence: null,
+		payloadFingerprint: computeAgentSessionPayloadFingerprint({
+			method: "agentSession.create",
+			sessionId,
+			fields: { worktree, agent, resumeFrom: undefined },
+		}),
+	};
+}
+
 export class OrcaRemoteClient {
 	private credential: PairedCredential | null = null;
 	private readonly openSubscriptions = new Set<RemoteRuntimeSubscription>();
@@ -700,6 +716,67 @@ export class OrcaRemoteClient {
 			);
 			const inventory = unwrapResponse(response);
 			return inventory.snapshots.flatMap((snapshot) => filterAgentTabs(snapshot.tabs));
+		} catch (err) {
+			throw toOrcaRemoteError(err);
+		}
+	}
+
+	async listRepos(): Promise<OrcaRepoSummary[]> {
+		const credential = this.requireCredential();
+		try {
+			const response = await sendRemoteRuntimeRequest<{ repos: OrcaRepoSummary[] }>(
+				credential, "repo.list", null, DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+			return unwrapResponse(response).repos;
+		} catch (err) {
+			throw toOrcaRemoteError(err);
+		}
+	}
+
+	// kind must be explicit: Orca's repo.add defaults to 'git', which would refuse a plain folder.
+	async addFolderRepo(path: string, displayName: string): Promise<OrcaRepoSummary> {
+		const credential = this.requireCredential();
+		try {
+			const response = await sendRemoteRuntimeRequest<{ repo: OrcaRepoSummary }>(
+				credential, "repo.add", { path, kind: "folder", displayName }, DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+			return unwrapResponse(response).repo;
+		} catch (err) {
+			throw toOrcaRemoteError(err);
+		}
+	}
+
+	async listWorkspaces(repoId: string): Promise<{ id: string; path: string }[]> {
+		const credential = this.requireCredential();
+		try {
+			const response = await sendRemoteRuntimeRequest<{ worktrees: { id: string; path: string }[] }>(
+				credential, "worktree.list", { repo: `id:${repoId}` }, DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+			return unwrapResponse(response).worktrees.map((w) => ({ id: w.id, path: w.path }));
+		} catch (err) {
+			throw toOrcaRemoteError(err);
+		}
+	}
+
+	async createClaudeSession(workspaceId: string): Promise<{ sessionId: string }> {
+		const credential = this.requireCredential();
+		const sessionId = crypto.randomUUID();
+		const worktree = `id:${workspaceId}`;
+		try {
+			const response = await sendRemoteRuntimeRequest<AgentSessionMutationResult<{ sessionId: string }>>(
+				credential,
+				"agentSession.create",
+				{ envelope: buildCreateEnvelope(sessionId, worktree, "claude"), worktree, agent: "claude" },
+				DEFAULT_REQUEST_TIMEOUT_MS,
+				undefined,
+				undefined,
+				STRUCTURED_AGENT_SESSION_CAPABILITIES,
+			);
+			const result = unwrapResponse(response);
+			if (!result.ok) {
+				throw new OrcaRemoteError(`agentSession.create refused (${result.refusal.code}): ${result.refusal.message}`, result.refusal);
+			}
+			return { sessionId: result.value.sessionId };
 		} catch (err) {
 			throw toOrcaRemoteError(err);
 		}
