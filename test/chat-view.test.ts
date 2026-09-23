@@ -61,7 +61,7 @@ test("interceptObsidianLinks injects a click-interception script once the guest 
 	webview.executeJavaScript = async (code: string) => {
 		calls.push(code);
 	};
-	interceptObsidianLinks(webview);
+	interceptObsidianLinks(webview, "Vault");
 
 	webview.dispatchEvent(new Event("dom-ready"));
 
@@ -78,7 +78,7 @@ test("interceptObsidianLinks opens obsidian:// links reported back via console-m
 		calls.push(url);
 	};
 	try {
-		interceptObsidianLinks(webview);
+		interceptObsidianLinks(webview, "Vault");
 		const event = new Event("console-message");
 		Object.assign(event, { message: "orca-chat:obsidian-link:obsidian://open?vault=Vault&file=notes%2Ffoo.md" });
 		webview.dispatchEvent(event);
@@ -97,7 +97,7 @@ test("interceptObsidianLinks ignores console-message events without the marker p
 		calls.push(url);
 	};
 	try {
-		interceptObsidianLinks(webview);
+		interceptObsidianLinks(webview, "Vault");
 		const event = new Event("console-message");
 		Object.assign(event, { message: "some unrelated guest console output" });
 		webview.dispatchEvent(event);
@@ -105,6 +105,50 @@ test("interceptObsidianLinks ignores console-message events without the marker p
 		assert.deepEqual(calls, []);
 	} finally {
 		shell.openExternal = original;
+	}
+});
+
+test("interceptObsidianLinks passes on only obsidian://open links to this vault", () => {
+	const webview = makeFakeWebview();
+	const calls: string[] = [];
+	const warnings: unknown[] = [];
+	const original = shell.openExternal;
+	const originalWarn = console.warn;
+	shell.openExternal = async (url: string) => {
+		calls.push(url);
+	};
+	console.warn = (...args: unknown[]) => void warnings.push(args);
+	const rejected = [
+		"file:///Applications/Calculator.app",
+		"https://example.com/",
+		"smb://host/share",
+		"x-apple.systempreferences:com.apple.preference",
+		"obsidian://open?vault=Other&file=a",
+		"obsidian://open?file=a",
+		"obsidian://open?vault=Vault&vault=Other&file=a",
+		"obsidian://open?vault=Vault&path=%2Fetc%2Fpasswd",
+		"obsidian://advanced-uri?vault=Vault&commandid=x",
+		"obsidian://open?vault=Vault&file=a\nb",
+		"obsidian://open?vault=Vault&file=a b",
+		"obsidian://open?vault=Vault&file=" + "x".repeat(5000),
+		"OBSIDIAN://open?vault=Vault&file=a",
+	];
+	try {
+		interceptObsidianLinks(webview, "Vault");
+		for (const link of rejected) {
+			const event = new Event("console-message");
+			Object.assign(event, { message: "orca-chat:obsidian-link:" + link });
+			webview.dispatchEvent(event);
+		}
+		assert.deepEqual(calls, []);
+		assert.equal(warnings.length, rejected.length);
+		const ok = new Event("console-message");
+		Object.assign(ok, { message: "orca-chat:obsidian-link:obsidian://open?vault=Vault&file=a#h" });
+		webview.dispatchEvent(ok);
+		assert.deepEqual(calls, ["obsidian://open?vault=Vault&file=a#h"]);
+	} finally {
+		shell.openExternal = original;
+		console.warn = originalWarn;
 	}
 });
 

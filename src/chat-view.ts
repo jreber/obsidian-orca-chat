@@ -58,8 +58,29 @@ function obsidianLinkInterceptorScript(marker: string): string {
 	})();`;
 }
 
+const MAX_OBSIDIAN_LINK_LENGTH = 4096;
+
+// The guest's report is untrusted: any frame or script in the guest page can console.log the marker,
+// and shell.openExternal hands whatever it gets to the OS (file:, smb:, custom protocol handlers). So
+// only an obsidian://open link naming this vault is passed on; anything else returns null.
+export function acceptedObsidianLink(message: string, vaultName: string): string | null {
+	if (!message.startsWith(OBSIDIAN_LINK_CONSOLE_MARKER)) return null;
+	const link = message.slice(OBSIDIAN_LINK_CONSOLE_MARKER.length);
+	if (link.length > MAX_OBSIDIAN_LINK_LENGTH || /[\u0000-\u001f\u007f\s]/.test(link)) return null;
+	// Matched as a string rather than with new URL(): how Chromium parses the host of a non-special
+	// scheme has changed between versions.
+	const prefix = "obsidian://open?";
+	if (!link.startsWith(prefix)) return null;
+	const params = new URLSearchParams(link.slice(prefix.length).split("#")[0]);
+	const vaults = params.getAll("vault");
+	// `path` opens an absolute path, whichever vault it is in.
+	if (vaults.length !== 1 || vaults[0] !== vaultName || params.has("path")) return null;
+	return link;
+}
+
 export function interceptObsidianLinks(
 	webview: HTMLElement & { executeJavaScript?: (code: string) => Promise<unknown> },
+	vaultName: string,
 ): void {
 	webview.addEventListener("dom-ready", () => {
 		void webview.executeJavaScript?.(obsidianLinkInterceptorScript(OBSIDIAN_LINK_CONSOLE_MARKER));
@@ -67,7 +88,12 @@ export function interceptObsidianLinks(
 	webview.addEventListener("console-message", ((event: Event) => {
 		const message = (event as unknown as { message?: unknown }).message;
 		if (typeof message !== "string" || !message.startsWith(OBSIDIAN_LINK_CONSOLE_MARKER)) return;
-		void shell.openExternal(message.slice(OBSIDIAN_LINK_CONSOLE_MARKER.length));
+		const link = acceptedObsidianLink(message, vaultName);
+		if (!link) {
+			console.warn("[orca-chat] ignored a link from the chat page that isn't an obsidian://open link to this vault");
+			return;
+		}
+		void shell.openExternal(link);
 	}) as EventListener);
 }
 
@@ -498,7 +524,7 @@ export class OrcaChatView extends ItemView {
 		webview.setAttribute("partition", `orca-embed-${sessionId}-${Date.now()}`);
 		webview.dataset.orcaSessionId = sessionId;
 		webview.addClass("orca-chat-webview");
-		interceptObsidianLinks(webview);
+		interceptObsidianLinks(webview, this.plugin.app.vault.getName());
 		// [[wikilinks]] in the agent's replies (see wikilinks.ts): opened in the main area, never here.
 		interceptWikilinks(webview, this.plugin.app, this.leaf);
 		watchEmbedLoad(webview, {
