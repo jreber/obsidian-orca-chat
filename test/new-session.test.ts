@@ -55,6 +55,34 @@ test("prefers the workspace whose path is the vault root when several exist", as
 	assert.ok(log.includes("create root"));
 });
 
+test("falls back to the first workspace when none is at the vault root", async () => {
+	const log: string[] = [];
+	const client = fakeClient({
+		listWorkspaces: async () => [{ id: "first", path: "/elsewhere" }, { id: "second", path: "/other" }],
+	}, log);
+	await createVaultSession(args(client));
+	assert.deepEqual(log, ["listRepos", "create first"]);
+});
+
+test("addFolderRepo failure propagates unchanged and nothing is listed or created", async () => {
+	const log: string[] = [];
+	const failure = new Error("repo.add refused");
+	const client = fakeClient({
+		listRepos: async () => (log.push("listRepos"), []),
+		addFolderRepo: async () => { throw failure; },
+	}, log);
+	await assert.rejects(createVaultSession(args(client)), (e: unknown) => e === failure);
+	assert.deepEqual(log, ["listRepos"]);
+});
+
+test("listWorkspaces failure propagates unchanged and nothing is created", async () => {
+	const log: string[] = [];
+	const failure = new Error("worktree.list refused");
+	const client = fakeClient({ listWorkspaces: async () => { throw failure; } }, log);
+	await assert.rejects(createVaultSession(args(client)), (e: unknown) => e === failure);
+	assert.deepEqual(log, ["listRepos"]);
+});
+
 test("listRepos failure propagates and nothing is added or created", async () => {
 	const log: string[] = [];
 	const client = fakeClient({ listRepos: async () => { throw new Error("offline"); } }, log);
