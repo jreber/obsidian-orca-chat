@@ -71,7 +71,11 @@ export function acceptedObsidianLink(message: string, vaultName: string): string
 	// scheme has changed between versions.
 	const prefix = "obsidian://open?";
 	if (!link.startsWith(prefix)) return null;
-	const params = new URLSearchParams(link.slice(prefix.length).split("#")[0]);
+	// A fragment (a heading) may not hold '&' or '=': whether the handler treats '#' as the end of the
+	// query or not, it can't add a parameter to the ones checked here.
+	const [query, ...fragment] = link.slice(prefix.length).split("#");
+	if (/[&=]/.test(fragment.join("#"))) return null;
+	const params = new URLSearchParams(query);
 	const vaults = params.getAll("vault");
 	// `path` opens an absolute path, whichever vault it is in.
 	if (vaults.length !== 1 || vaults[0] !== vaultName || params.has("path")) return null;

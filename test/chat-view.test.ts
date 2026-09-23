@@ -149,6 +149,10 @@ test("interceptObsidianLinks passes on only obsidian://open links to this vault"
 		"obsidian://open?vault=Vault&file=a b",
 		"obsidian://open?vault=Vault&file=" + "x".repeat(5000),
 		"OBSIDIAN://open?vault=Vault&file=a",
+		// Anything after '#' that could be read as a parameter: what is passed on must be what was checked.
+		"obsidian://open?vault=Vault#&path=%2FUsers%2Fx%2FOther%2Fsecret.md",
+		"obsidian://open?vault=Vault&file=a#x=1",
+		"obsidian://open?file=a#&vault=Vault",
 	];
 	try {
 		interceptObsidianLinks(webview, "Vault");
