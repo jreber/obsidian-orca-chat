@@ -3,7 +3,7 @@
 	"name": "Orca Chat",
 	"version": "0.1.0",
 	"minAppVersion": "1.4.0",
-	"description": "Chat with a local Orca-managed agent session (Claude Code, OpenCode, or Copilot) from inside Obsidian, and send highlighted text plus a question straight into the session.",
+	"description": "A Claude chat rooted at your vault, run by Orca, inside Obsidian.",
 	"author": "James Reber",
 	"isDesktopOnly": true
 }

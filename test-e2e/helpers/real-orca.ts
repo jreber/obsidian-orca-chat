@@ -17,6 +17,10 @@ import { decodePairingUrl, type PairedCredential } from "../../src/orca-pairing"
 // stub Claude. Unset → the combined specs skip.
 export const ORCA_DIR = process.env.ORCA_E2E_ORCA_DIR;
 
+// Teardown finds the processes this helper started with `ps` and `pgrep`, which Windows lacks.
+export const REAL_ORCA_UNSUPPORTED_REASON =
+	process.platform === "win32" ? "the real-Orca e2e helper uses ps/pgrep for teardown; not supported on Windows" : null;
+
 const STUB_SUBDIR = path.join("tests", "e2e", "fixtures", "structured-claude-stub");
 
 export type RuntimeCallResponse<T> = { ok: true; result: T } | { ok: false; error: { code: string; message: string } };
@@ -161,6 +165,7 @@ async function quitApp(app: ElectronApplication): Promise<void> {
 }
 
 export async function launchRealOrca(options: LaunchRealOrcaOptions): Promise<RealOrca> {
+	if (REAL_ORCA_UNSUPPORTED_REASON) throw new Error(REAL_ORCA_UNSUPPORTED_REASON);
 	const orcaDir = requireOrcaDir();
 	const electronPath = createRequire(path.join(orcaDir, "package.json"))("electron") as string;
 	mkdirSync(options.root, { recursive: true });

@@ -10,7 +10,7 @@ import path from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import { test as base, expect } from "./helpers/obsidian-fixture";
 import { chatWebview, newSessionButton, reopenPane, SCREENSHOT_DIR, statusLabel, storedSessionId } from "./helpers/pane";
-import { enableStructuredChatDashboard, launchRealOrca, ORCA_DIR, type RealOrca } from "./helpers/real-orca";
+import { enableStructuredChatDashboard, launchRealOrca, ORCA_DIR, REAL_ORCA_UNSUPPORTED_REASON, type RealOrca } from "./helpers/real-orca";
 import { OrcaRemoteClient } from "../src/orca-remote-client";
 import { decodePairingUrl } from "../src/orca-pairing";
 import { MOBILE_PAIRING_NOTICE, newSessionFailureMessage } from "../src/new-session";
@@ -46,6 +46,7 @@ const test = base.extend<{ realOrca: RealOrca; orcaClaudeOnPath: "stub-first" | 
 });
 
 test.skip(!ORCA_DIR, "set ORCA_E2E_ORCA_DIR to an Orca checkout with an e2e build");
+test.skip(REAL_ORCA_UNSUPPORTED_REASON !== null, REAL_ORCA_UNSUPPORTED_REASON ?? "");
 
 // Evidence for the report, printed as one JSON line per finding.
 function record(finding: string, data: unknown): void {
