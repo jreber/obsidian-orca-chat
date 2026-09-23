@@ -100,6 +100,7 @@ function minimalSubmission(clientMessageId: string) {
 // part of the desktop build. "drop": the connection closes with no response (a network-level load
 // failure). { html }: a 200 page, standing in for a working Orca build.
 export type EmbedPageMode = "missing" | "drop" | { html: string };
+export type LostReplyMode = "silent" | "drop";
 
 export type FakeRepo = { id: string; path: string; kind?: "git" | "folder"; displayName?: string };
 export type FakeWorkspace = { id: string; path: string };
@@ -124,6 +125,10 @@ export class FakeOrcaServer {
 	private repos: FakeRepo[] = [];
 	private workspacesByRepo = new Map<string, FakeWorkspace[]>();
 	private createRefusal: { code: string; message: string } | null = null;
+	// Committed creates by clientOperationId, so a replay of the same operation is answered as Orca's
+	// operation ledger answers it (replayed: true) instead of creating a second session.
+	private createdOperations = new Map<string, { sessionId: string; payloadFingerprint: string }>();
+	private lostCreateReplies: { remaining: number; mode: LostReplyMode; commit: boolean } | null = null;
 
 	private constructor(http: Server, wss: WebSocketServer, keyPair: nacl.BoxKeyPair) {
 		this.http = http;
@@ -176,6 +181,13 @@ export class FakeOrcaServer {
 	// instead of creating a session.
 	setCreateRefusal(refusal: { code: string; message: string } | null): void {
 		this.createRefusal = refusal;
+	}
+
+	// The next `count` agentSession.create calls lose their reply: "silent" never answers (the client
+	// times out), "drop" closes the socket (a transport error). With `commit` (the default) the create
+	// still happens, as when Orca finishes a create whose reply never reaches the client.
+	loseCreateReplies(count: number, mode: LostReplyMode, { commit = true }: { commit?: boolean } = {}): void {
+		this.lostCreateReplies = count > 0 ? { remaining: count, mode, commit } : null;
 	}
 
 	setEmbedPage(mode: EmbedPageMode): void {
@@ -270,10 +282,17 @@ export class FakeOrcaServer {
 				reply({ repos: this.repos });
 				return;
 			case "repo.add": {
-				// Like Orca: adding a folder project also gives it its one workspace (the folder itself).
+				// Like Orca: adding a path that is already a project returns that project; adding a folder
+				// project also gives it its one workspace (the folder itself).
+				const path = String(params.path);
+				const existing = this.repos.find((r) => r.path === path);
+				if (existing) {
+					reply({ repo: existing });
+					return;
+				}
 				const repo: FakeRepo = {
 					id: "repo-added",
-					path: String(params.path),
+					path,
 					kind: "folder",
 					displayName: typeof params.displayName === "string" ? params.displayName : undefined,
 				};
@@ -300,16 +319,50 @@ export class FakeOrcaServer {
 					reply({ ok: false, refusal: this.createRefusal });
 					return;
 				}
-				const envelope = (params.envelope ?? {}) as { sessionId?: unknown };
+				const envelope = (params.envelope ?? {}) as {
+					sessionId?: unknown;
+					clientOperationId?: unknown;
+					expectedRuntimeFence?: unknown;
+					payloadFingerprint?: unknown;
+				};
+				// Like Orca: create is the one mutation that must not fence.
+				if (envelope.expectedRuntimeFence !== null) {
+					fail("agent_session_operation_invalid", "agent_session_operation_invalid");
+					return;
+				}
 				const sessionId = String(envelope.sessionId);
-				this.tabs = [...this.tabs, agentSessionTab(sessionId, "New chat")];
-				reply({
-					ok: true,
-					replayed: false,
-					fence: 1,
-					cursor: { epoch: "e2e", sequence: 0 },
-					value: { sessionId, fence: 1, page: historyPage(sessionId, []), unconfirmedClientMessageIds: [] },
-				});
+				const operationId = String(envelope.clientOperationId);
+				const fingerprint = String(envelope.payloadFingerprint);
+				const answer = (replayed: boolean) =>
+					reply({
+						ok: true,
+						replayed,
+						fence: 1,
+						cursor: { epoch: "e2e", sequence: 0 },
+						value: { sessionId, fence: 1, page: historyPage(sessionId, []), unconfirmedClientMessageIds: [] },
+					});
+				const lost = this.lostCreateReplies;
+				if (lost) {
+					lost.remaining--;
+					if (lost.remaining <= 0) this.lostCreateReplies = null;
+				}
+				const committed = this.createdOperations.get(operationId);
+				if (committed) {
+					if (committed.sessionId !== sessionId || committed.payloadFingerprint !== fingerprint) {
+						reply({ ok: false, refusal: { code: "agent_session_operation_conflict", message: "operation id reused" } });
+					} else if (!lost) {
+						answer(true);
+					} else if (lost.mode === "drop") {
+						conn.terminate();
+					}
+					return;
+				}
+				if (!lost || lost.commit) {
+					this.createdOperations.set(operationId, { sessionId, payloadFingerprint: fingerprint });
+					this.tabs = [...this.tabs, agentSessionTab(sessionId, "New chat")];
+				}
+				if (!lost) answer(false);
+				else if (lost.mode === "drop") conn.terminate();
 				return;
 			}
 			case "agentSession.history": {

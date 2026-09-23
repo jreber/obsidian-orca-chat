@@ -39,6 +39,9 @@ export const STRUCTURED_AGENT_SESSION_CAPABILITIES: readonly RuntimeCapability[]
 // connect()/disconnect() here are a thin credential holder plus bookkeeping
 // to close any live subscriptions, not a real socket lifecycle.
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+// agentSession.create may install and start Orca's session host, prepare and commit: a cold first
+// create can take well over the read timeout.
+const CREATE_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_SUBSCRIBE_START_TIMEOUT_MS = 10_000;
 
 export class OrcaRemoteError extends Error {
@@ -538,9 +541,32 @@ export function buildCreateEnvelope(sessionId: string, worktree: string, agent: 
 	};
 }
 
+// "unknown": the create may or may not have happened (no answer, or Orca's own
+// agent_session_operation_unknown); "failed": Orca answered that nothing was created.
+type CreateOutcome =
+	| { kind: "created"; value: { sessionId: string } }
+	| { kind: "failed" | "unknown"; error: OrcaRemoteError };
+
+function createOutcome(response: RuntimeRpcResponse<AgentSessionMutationResult<{ sessionId: string }>>): CreateOutcome {
+	if (!response.ok) return { kind: "failed", error: new OrcaRemoteError(response.error.message, response.error) };
+	const result = response.result;
+	if (result.ok) return { kind: "created", value: { sessionId: result.value.sessionId } };
+	const error = new OrcaRemoteError(
+		`agentSession.create refused (${result.refusal.code}): ${result.refusal.message}`,
+		result.refusal,
+	);
+	return { kind: result.refusal.code === "agent_session_operation_unknown" ? "unknown" : "failed", error };
+}
+
 export class OrcaRemoteClient {
 	private credential: PairedCredential | null = null;
 	private readonly openSubscriptions = new Set<RemoteRuntimeSubscription>();
+	private readonly createTimeoutMs: number;
+
+	// `createTimeoutMs` is for tests.
+	constructor(options: { createTimeoutMs?: number } = {}) {
+		this.createTimeoutMs = options.createTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS;
+	}
 
 	// No real socket to open up front (see file header) — this just stores the
 	// credential every subsequent call needs. Kept as an explicit async step
@@ -768,27 +794,48 @@ export class OrcaRemoteClient {
 		}
 	}
 
+	// The session id is generated here, so an outcome lost in transit (a timeout, a dropped socket, or
+	// Orca's "may have been created" refusal) is recovered rather than reported as "not created" while
+	// Orca goes on to finish the create: the SAME envelope is sent once more, which Orca's operation
+	// ledger answers as a replay of the committed create, and failing that the id is looked up in
+	// session.tabs.listAll. Only if neither finds it does the original failure stand.
 	async createClaudeSession(workspaceId: string): Promise<{ sessionId: string }> {
 		const credential = this.requireCredential();
 		const sessionId = crypto.randomUUID();
 		const worktree = `id:${workspaceId}`;
-		try {
-			const response = await sendRemoteRuntimeRequest<AgentSessionMutationResult<{ sessionId: string }>>(
+		const params = { envelope: buildCreateEnvelope(sessionId, worktree, "claude"), worktree, agent: "claude" };
+		const send = () =>
+			sendRemoteRuntimeRequest<AgentSessionMutationResult<{ sessionId: string }>>(
 				credential,
 				"agentSession.create",
-				{ envelope: buildCreateEnvelope(sessionId, worktree, "claude"), worktree, agent: "claude" },
-				DEFAULT_REQUEST_TIMEOUT_MS,
+				params,
+				this.createTimeoutMs,
 				undefined,
 				undefined,
 				STRUCTURED_AGENT_SESSION_CAPABILITIES,
 			);
-			const result = unwrapResponse(response);
-			if (!result.ok) {
-				throw new OrcaRemoteError(`agentSession.create refused (${result.refusal.code}): ${result.refusal.message}`, result.refusal);
-			}
-			return { sessionId: result.value.sessionId };
+		let outcome: CreateOutcome;
+		try {
+			outcome = createOutcome(await send());
 		} catch (err) {
-			throw toOrcaRemoteError(err);
+			outcome = { kind: "unknown", error: toOrcaRemoteError(err) };
+		}
+		if (outcome.kind === "unknown") {
+			console.warn("[orca-chat] agentSession.create outcome unknown; checking whether Orca created it", outcome.error.message);
+			const replay = await send().then(createOutcome, (err: unknown) => ({ kind: "unknown", error: toOrcaRemoteError(err) }) as const);
+			if (replay.kind === "created") return replay.value;
+			if (await this.hasAgentSession(sessionId)) return { sessionId };
+		}
+		if (outcome.kind === "created") return outcome.value;
+		throw outcome.error;
+	}
+
+	// Whether session.tabs.listAll lists `sessionId`; false if the list itself fails.
+	private async hasAgentSession(sessionId: string): Promise<boolean> {
+		try {
+			return (await this.listAllAgentSessionTabs()).some((tab) => tab.sessionId === sessionId);
+		} catch {
+			return false;
 		}
 	}
 

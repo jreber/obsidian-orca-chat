@@ -8,6 +8,8 @@ export interface ServerConnection {
 	// agentSession.* on these per connection.
 	clientCapabilities: readonly string[];
 	sendEncrypted(payload: unknown): void;
+	// Drops the socket without answering, as a network failure mid-request would.
+	terminate(): void;
 }
 
 // Host side of the same E2EE handshake src/orca-remote/remote-runtime-request-socket.ts drives from
@@ -43,6 +45,7 @@ export function acceptOrcaConnection(
 				deviceToken: String(frame.deviceToken ?? ""),
 				clientCapabilities: Array.isArray(frame.clientCapabilities) ? frame.clientCapabilities.map(String) : [],
 				sendEncrypted: (payload) => ws.send(encrypt(JSON.stringify(payload), key)),
+				terminate: () => ws.terminate(),
 			};
 			conn.sendEncrypted({ type: "e2ee_authenticated" });
 			return;

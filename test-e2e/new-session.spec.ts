@@ -189,6 +189,27 @@ test("a session closed in Orca is torn down by the periodic check", async ({ ser
 	await expect(chatWebview(obsidian)).toHaveCount(0);
 });
 
+// Orca can finish a create whose answer never reaches the plugin (here the socket drops right after
+// the create commits). The pane must adopt that session, not report "not created" and leave it
+// orphaned in Orca.
+test("a create whose answer is lost is recovered and attached, not orphaned", async ({ server, obsidian, vaultPath }) => {
+	server.setEmbedPage(EMBED_PAGE);
+	await registerVault(server, vaultPath);
+	server.loseCreateReplies(1, "drop");
+
+	await newSessionButton(obsidian).click();
+
+	await expect(chatWebview(obsidian)).toBeAttached();
+	const creates = createCalls(server);
+	expect(creates).toHaveLength(2);
+	expect(creates[1].envelope).toEqual(creates[0].envelope);
+	const sessionId = creates[0].envelope.sessionId;
+	await expect(chatWebview(obsidian)).toHaveAttribute("data-orca-session-id", sessionId);
+	await expect(statusLabel(obsidian)).toHaveText("● Live chat");
+	await expect(obsidian.locator(".notice", { hasText: /not created|error/i })).toHaveCount(0);
+	expect(await storedSessionId(obsidian)).toBe(sessionId);
+});
+
 test("a refused create reports Orca's reason and stores nothing", async ({ server, obsidian, vaultPath }) => {
 	await registerVault(server, vaultPath);
 	server.setCreateRefusal({ code: "agent_session_unsupported", message: "nope" });
