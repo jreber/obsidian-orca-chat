@@ -207,6 +207,44 @@ test("pane renders the New session button, status label and embed, with no sessi
 	assert.equal(view.contentEl.querySelector("select"), null);
 });
 
+// Beside New session: writes the plugin's advice block into the vault root's AGENTS.md.
+test("the Append AGENTS.md advice button sits right after New session and writes AGENTS.md", async () => {
+	const app = new App();
+	const files: Record<string, string> = { "AGENTS.md": "# Mine\n" };
+	const adapter = Object.assign(new obsidianFake.FileSystemAdapter("/vault"), {
+		exists: async (p: string) => p in files,
+		read: async (p: string) => files[p],
+		write: async (p: string, data: string) => void (files[p] = data),
+	});
+	app.vault.adapter = adapter;
+	const view = new OrcaChatView(new WorkspaceLeaf(), new Plugin(app));
+	await view.onOpen();
+	const newSession = view.contentEl.querySelector("button.orca-chat-new-session")!;
+	const advice = view.contentEl.querySelector("button.orca-chat-agents-advice") as HTMLButtonElement;
+	assert.equal(advice.textContent, "Append AGENTS.md advice");
+	assert.equal(newSession.nextElementSibling, advice);
+	assert.ok(advice.classList.contains("mod-cta"), "styled like New session");
+
+	FakeNoticeLog.length = 0;
+	advice.click();
+	for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(FakeNoticeLog, ["Added Orca Chat advice to AGENTS.md"]);
+	assert.match(files["AGENTS.md"], /^# Mine\n\n<!-- orca-chat:advice:start -->/);
+	advice.click();
+	for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(FakeNoticeLog, ["Added Orca Chat advice to AGENTS.md", "Updated Orca Chat advice in AGENTS.md"]);
+	assert.equal(files["AGENTS.md"].split("<!-- orca-chat:advice:start -->").length, 2);
+});
+
+test("Append AGENTS.md advice needs desktop Obsidian", async () => {
+	const view = makeView();
+	await view.onOpen();
+	FakeNoticeLog.length = 0;
+	(view.contentEl.querySelector("button.orca-chat-agents-advice") as HTMLButtonElement).click();
+	for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+	assert.ok(FakeNoticeLog.includes("Orca Chat needs desktop Obsidian"));
+});
+
 test("no stored session: shows the button state, mounts nothing", async () => {
 	const view = makeView();
 	await view.onOpen();

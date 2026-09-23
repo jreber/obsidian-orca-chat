@@ -1,6 +1,7 @@
 import { shell } from "electron";
 import { ItemView, Notice, Plugin, type Workspace, WorkspaceLeaf } from "obsidian";
 import { confirmAddVaultProject } from "./add-project-modal";
+import { appendAgentsAdvice } from "./agents-guidance";
 import { buildSingleSessionEmbedUrl } from "./embed-url";
 import {
 	createVaultSession,
@@ -189,6 +190,12 @@ export class OrcaChatView extends ItemView {
 			cls: "mod-cta orca-chat-new-session",
 		});
 		this.newSessionButton.onclick = () => void this.onNewSession();
+
+		const adviceButton = headerRow.createEl("button", {
+			text: "Append AGENTS.md advice",
+			cls: "mod-cta orca-chat-agents-advice",
+		});
+		adviceButton.onclick = () => void this.onAppendAgentsAdvice();
 
 		this.statusLabel = headerRow.createEl("span", { cls: "orca-chat-status-label" });
 
@@ -380,6 +387,22 @@ export class OrcaChatView extends ItemView {
 		} finally {
 			this.busy = false;
 			this.newSessionButton.disabled = false;
+		}
+	}
+
+	// Writes the plugin's advice for the chat's agent into AGENTS.md at the vault root (the session's
+	// working folder); see agents-guidance.ts.
+	private async onAppendAgentsAdvice(): Promise<void> {
+		const app = this.plugin.app;
+		if (!getVaultRootPath(app)) {
+			new Notice("Orca Chat needs desktop Obsidian");
+			return;
+		}
+		try {
+			new Notice(await appendAgentsAdvice(app.vault.adapter));
+		} catch (err) {
+			new Notice(`Orca Chat: couldn't update AGENTS.md — ${err instanceof Error ? err.message : "see console"}`);
+			console.error("[orca-chat] couldn't update AGENTS.md", err);
 		}
 	}
 

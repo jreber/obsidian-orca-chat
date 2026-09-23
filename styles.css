@@ -6,6 +6,7 @@
 
 .orca-chat-header-row {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 8px;
 	padding: 6px 8px;
@@ -13,8 +14,10 @@
 	flex-shrink: 0;
 }
 
-.orca-chat-new-session {
+.orca-chat-new-session,
+.orca-chat-agents-advice {
 	flex: 0 0 auto;
+	white-space: nowrap;
 }
 
 .orca-chat-status-label {

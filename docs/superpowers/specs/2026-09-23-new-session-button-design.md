@@ -137,16 +137,18 @@ It also doesn't parse `[[wikilinks]]`: they render as literal text `[[Note]]`.
   the real-Orca spec, where the stub Claude answers with `See [[Welcome]] and [[Missing note]].`
   (Orca's `CLAUDE_STUB_REPLY`, added for this) and both are checked in the real transcript.
 
-## Guidance for the agent: AGENTS.md in the vault
+## Advice for the agent: AGENTS.md in the vault
 
-The chat session's working folder is the vault root, so standing guidance belongs in the vault's
-`AGENTS.md` (Claude Code reads `CLAUDE.md`, which needs a line `@AGENTS.md`). Files in the Orca or
-plugin repos are never read by the agent. The command **Add chat guidelines to AGENTS.md** writes a
-block between `<!-- orca-chat:guidelines:start -->` and `<!-- orca-chat:guidelines:end -->`: be brief,
-link notes as wikilinks that exist in this vault, not inside code. It creates the file, appends after
-a blank line in the file's own line endings, or does nothing when the block is there, and never
-changes text outside the markers or touches `CLAUDE.md` (the Notice advises adding `@AGENTS.md`).
-See [docs/vault-agents-guidance.md](../../vault-agents-guidance.md).
+The chat session's working folder is the vault root, so standing guidance for the agent belongs in the
+vault's own `AGENTS.md`; files in the Orca or plugin repos are never read by it. The pane's header has
+an **Append AGENTS.md advice** button beside New session (same style; the header wraps in a narrow
+pane). It writes a block between `<!-- orca-chat:advice:start -->` and `<!-- orca-chat:advice:end -->`:
+be brief and conversational, and use inline `[[wikilinks]]` to existing notes where appropriate. It
+creates the file if it is missing, appends the block at the end after a blank line, or replaces an
+existing block in place (never a second copy). It never changes text outside the markers and keeps the
+file's line endings. A start marker without an end marker is refused. Notices: "Added Orca Chat
+advice to AGENTS.md" or "Updated Orca Chat advice in AGENTS.md". See
+[docs/vault-agents-guidance.md](../../vault-agents-guidance.md). There is no command-palette entry.
 
 ## Versioning
 
@@ -184,7 +186,6 @@ files have uncommitted changes, `unknown` without git), and `versionLabel()`
 4. Open the Orca Chat pane and click **New session**. Approve "Add this vault to Orca?" once.
 5. Expect: "Connecting…" then "● Live chat"; the chat visible in the pane; the vault as a project and a
    "Claude Chat" card on Orca's Agent Dashboard. Reopening the pane reattaches to the same chat.
-6. Optional: run **Add chat guidelines to AGENTS.md** and add a line `@AGENTS.md` to the vault's
-   `CLAUDE.md`, so new chats link notes as clickable `[[wikilinks]]`. See
-   [docs/vault-agents-guidance.md](../../vault-agents-guidance.md). The Pair with Orca dialog's footer
-   shows the installed version and build (`Orca Chat v0.2.0 (<hash>)`).
+6. Optional: click **Append AGENTS.md advice** in the pane so new chats link notes as clickable
+   `[[wikilinks]]` (see [docs/vault-agents-guidance.md](../../vault-agents-guidance.md)). The Pair with
+   Orca dialog's footer shows the installed version and build (`Orca Chat v0.2.0 (<hash>)`).

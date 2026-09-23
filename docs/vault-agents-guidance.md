@@ -1,39 +1,29 @@
-# Guidance for the chat's agent: AGENTS.md in the vault
+# Advice for the chat's agent: AGENTS.md in the vault
 
-The Orca Chat pane runs a Claude session whose working folder is the **vault root**. The agent reads
-standing instructions from files in that folder, so that is where chat guidance has to go. Files in the
-Orca repo or in this plugin's repo are never read by the agent.
+The Orca Chat pane runs an agent whose working folder is the vault root, so it reads standing
+guidance from the vault's own `AGENTS.md`. Files in the Orca or plugin repos are never read by it.
 
-Claude Code reads `CLAUDE.md`, not `AGENTS.md`. To have it read `AGENTS.md` too, put a line
-`@AGENTS.md` in the vault root's `CLAUDE.md` (create it if there isn't one).
-
-## The command
-
-Run **Orca Chat: Add chat guidelines to AGENTS.md** from the command palette. It:
-
-- creates `AGENTS.md` at the vault root with the block below if there is no such file;
-- appends the block, after a blank line, if the file exists without it;
-- does nothing ("already there") if the block's start marker is already in the file.
-
-It never changes text outside the markers, never overwrites the file, and keeps the file's line
-endings (CRLF stays CRLF). It never creates or edits `CLAUDE.md`; if `CLAUDE.md` is missing or has no
-`@AGENTS.md` line, the Notice says to add one. Edit the text between the markers however you like;
-running the command again won't touch it.
-
-## The block
+The pane's **Append AGENTS.md advice** button (next to **New session**) writes the block below into
+the vault root's `AGENTS.md`. It creates the file if it is missing and appends the block at the end,
+after a blank line. If the block is already there, it replaces the block in place with the current
+text rather than adding a second copy. Nothing outside the markers is ever changed, and the file's
+line endings are kept. The Notice says "Added Orca Chat advice to AGENTS.md" or "Updated Orca Chat
+advice in AGENTS.md".
 
 ```markdown
-<!-- orca-chat:guidelines:start -->
+<!-- orca-chat:advice:start -->
 ## Orca Chat (Obsidian)
 
 This folder is an Obsidian vault, and you may be talking to its owner through the Orca Chat pane in Obsidian.
 
-- Be conversational and brief.
-- Mention notes with inline Obsidian wikilinks — [[Note Title]] or [[Note Title|shown text]] — as often as is natural. The chat pane makes them clickable.
+- Be brief and conversational.
+- Where it helps, mention notes with inline Obsidian wikilinks — [[Note Title]] or [[Note Title|shown text]]. The chat pane makes them clickable.
 - Only link notes that exist in this vault: check with a file search first, and use the note's exact name without ".md".
 - Don't put wikilinks inside code spans or code blocks; they won't be clickable there.
-<!-- orca-chat:guidelines:end -->
+<!-- orca-chat:advice:end -->
 ```
+
+To keep your own wording, write it outside the markers; the button owns what is between them.
 
 ## Why wikilinks
 

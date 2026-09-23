@@ -1,11 +1,9 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
-import { addChatGuidelinesToVault } from "./agents-guidance";
 import { AnnotateModal } from "./annotate-modal";
 import { buildAnnotateMessage, buildObsidianOpenUri, formatLocation, lineRangeFromEditorCursors, readingModeLineRange, sectionInfoToLineTag } from "./annotate-location";
 import { buildFlashcardAskMessage, FlashcardContext, isReviewModalOpen, resolveCurrentFlashcard } from "./flashcard-context";
 import { ORCA_CHAT_VIEW_TYPE, OrcaChatView, reloadChatViewCredentials } from "./chat-view";
 import { PairingModal } from "./pairing-modal";
-import { getVaultRootPath } from "./vault-path";
 import { versionLabel } from "./version";
 
 const ORCA_LINE_TAG_ATTR = "orcaLine";
@@ -70,26 +68,6 @@ export default class OrcaChatPlugin extends Plugin {
 			// Open panes read the pairing when they open; after a (re-)pair, have them read it again.
 			callback: () => new PairingModal(this.app, this, () => reloadChatViewCredentials(this.app.workspace)).open(),
 		});
-
-		this.addCommand({
-			id: "add-chat-guidelines",
-			name: "Add chat guidelines to AGENTS.md",
-			callback: () => void this.addChatGuidelines(),
-		});
-	}
-
-	// Writes the chat guidelines block into AGENTS.md at the vault root (see agents-guidance.ts).
-	private async addChatGuidelines(): Promise<void> {
-		if (!getVaultRootPath(this.app)) {
-			new Notice("Orca Chat needs desktop Obsidian");
-			return;
-		}
-		try {
-			new Notice(await addChatGuidelinesToVault(this.app.vault.adapter), 10_000);
-		} catch (err) {
-			new Notice("Orca Chat: couldn't update AGENTS.md, see console");
-			console.error("[orca-chat] couldn't add the chat guidelines to AGENTS.md", err);
-		}
 	}
 
 	onunload() {
