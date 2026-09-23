@@ -2,6 +2,7 @@
 // git hash, shown in the Pair with Orca dialog and logged on load.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -17,7 +18,17 @@ test("versionLabel is 'Orca Chat v<semver> (<short hash, maybe -dirty, or unknow
 	assert.match(versionLabel(), /^Orca Chat v\d+\.\d+\.\d+ \(([0-9a-f]{7,40}(-dirty)?|unknown)\)$/);
 });
 
-test("the test build is stamped with the git hash, not 'unknown'", () => {
+// Only meaningful in a git checkout: a source tarball or `git archive` export builds as "unknown".
+const inGitCheckout = (() => {
+	try {
+		execFileSync("git", ["rev-parse", "--git-dir"], { cwd: root, stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	}
+})();
+
+test("the test build is stamped with the git hash, not 'unknown'", { skip: !inGitCheckout && "not a git checkout" }, () => {
 	assert.notEqual(BUILD_HASH, "unknown");
 });
 
