@@ -90,8 +90,16 @@ export class View extends Component {
 
 export class ItemView extends View {}
 
+export class FileSystemAdapter {
+	constructor(private base: string) {}
+	getBasePath() {
+		return this.base;
+	}
+}
+
 export class App {
 	workspace: Record<string, unknown> = {};
+	vault: { adapter: unknown; getName(): string } = { adapter: {}, getName: () => "Vault" };
 }
 
 export class TFile {
