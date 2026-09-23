@@ -155,6 +155,8 @@ export async function reloadChatViewCredentials(workspace: Pick<Workspace, "getL
 const NO_SESSION_STATUS = "No session yet";
 const NOT_PAIRED_STATUS = "Not paired with Orca";
 const SESSION_CHECK_INTERVAL_MS = 15_000;
+export const ADVICE_BUTTON_TOOLTIP =
+	"Adds (or updates) a block in the vault's AGENTS.md telling the chat's agent to be brief and to link notes as [[wikilinks]]. Text outside the block is left alone.";
 
 // What the pane needs from the Orca RPC client: session creation (NewSessionClient) plus the
 // liveness list, the out-of-band send, and disconnect. OrcaRemoteClient satisfies it structurally.
@@ -163,6 +165,7 @@ type ChatViewClient = NewSessionClient &
 
 export class OrcaChatView extends ItemView {
 	private newSessionButton!: HTMLButtonElement;
+	private adviceButton!: HTMLButtonElement;
 	private statusLabel!: HTMLSpanElement;
 	private embedContainer!: HTMLDivElement;
 	private currentWebview: HTMLElement | null = null;
@@ -217,11 +220,13 @@ export class OrcaChatView extends ItemView {
 		});
 		this.newSessionButton.onclick = () => void this.onNewSession();
 
-		const adviceButton = headerRow.createEl("button", {
+		// A one-off setup action, so a plain (secondary) button; New session is the pane's one CTA.
+		this.adviceButton = headerRow.createEl("button", {
 			text: "Append AGENTS.md advice",
-			cls: "mod-cta orca-chat-agents-advice",
+			cls: "orca-chat-agents-advice",
+			attr: { title: ADVICE_BUTTON_TOOLTIP },
 		});
-		adviceButton.onclick = () => void this.onAppendAgentsAdvice();
+		this.adviceButton.onclick = () => void this.onAppendAgentsAdvice();
 
 		this.statusLabel = headerRow.createEl("span", { cls: "orca-chat-status-label" });
 
@@ -418,17 +423,22 @@ export class OrcaChatView extends ItemView {
 
 	// Writes the plugin's advice for the chat's agent into AGENTS.md at the vault root (the session's
 	// working folder); see agents-advice.ts.
-	private async onAppendAgentsAdvice(): Promise<void> {
+	// Public for tests (the button's onclick calls it).
+	async onAppendAgentsAdvice(): Promise<void> {
 		const app = this.plugin.app;
 		if (!getVaultRootPath(app)) {
 			new Notice("Orca Chat needs desktop Obsidian");
 			return;
 		}
+		if (this.adviceButton.disabled) return;
+		this.adviceButton.disabled = true;
 		try {
-			new Notice(await appendAgentsAdvice(app.vault.adapter));
+			new Notice(await appendAgentsAdvice(app.vault));
 		} catch (err) {
 			new Notice(`Orca Chat: couldn't update AGENTS.md — ${err instanceof Error ? err.message : "see console"}`);
 			console.error("[orca-chat] couldn't update AGENTS.md", err);
+		} finally {
+			this.adviceButton.disabled = false;
 		}
 	}
 

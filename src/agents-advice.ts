@@ -1,5 +1,6 @@
 // Standing advice for the chat's agent, kept in AGENTS.md at the vault root: the chat session's
-// working folder is the vault root, so that is where the agent looks. The pane's "Append AGENTS.md
+// working folder is the vault root, so that is where Claude Code looks for it (unless the vault has
+// a CLAUDE.md; see CLAUDE_MD_NOTE). The pane's "Append AGENTS.md
 // advice" button writes the plugin's marker-delimited block there. It adds the block once and
 // afterwards replaces it in place, and never changes anything outside the markers.
 export const ADVICE_START = "<!-- orca-chat:advice:start -->";
@@ -43,17 +44,47 @@ export function applyAdvice(existing: string | null): AdviceResult {
 	return { action: "added", text: existing + joiner + adviceBlock(eol) };
 }
 
-// The parts of Obsidian's DataAdapter this needs (paths are vault-relative).
-export type AdviceAdapter = {
-	exists(path: string): Promise<boolean>;
-	read(path: string): Promise<string>;
-	write(path: string, data: string): Promise<void>;
+// Current Claude Code reads AGENTS.md only in a project with no CLAUDE.md of its own (its
+// `instructionFiles` default), so a vault that has one may never show the agent this advice.
+export const CLAUDE_MD_FILES = ["CLAUDE.md", ".claude/CLAUDE.md"];
+export const CLAUDE_MD_NOTE = "This vault has a CLAUDE.md, and current Claude Code may read that instead of AGENTS.md.";
+
+// The parts of Obsidian's Vault this needs (paths are vault-relative). The write goes through
+// Vault#process, so it is atomic with an open editor's pending save; `adapter.exists` sees files the
+// vault doesn't index (.claude/).
+export type AdviceVault<F> = {
+	getFileByPath(path: string): F | null;
+	read(file: F): Promise<string>;
+	process(file: F, fn: (data: string) => string): Promise<string>;
+	create(path: string, data: string): Promise<unknown>;
+	adapter: { exists(path: string): Promise<boolean> };
 };
 
 // Writes the advice into the vault root's AGENTS.md; resolves to the Notice text.
-export async function appendAgentsAdvice(adapter: AdviceAdapter): Promise<string> {
-	const existing = (await adapter.exists(AGENTS_FILE)) ? await adapter.read(AGENTS_FILE) : null;
-	const result = applyAdvice(existing);
-	if (result.text !== existing) await adapter.write(AGENTS_FILE, result.text);
-	return result.action === "added" ? ADDED_NOTICE : UPDATED_NOTICE;
+export async function appendAgentsAdvice<F>(vault: AdviceVault<F>): Promise<string> {
+	const file = vault.getFileByPath(AGENTS_FILE);
+	let action: AdviceResult["action"];
+	if (!file) {
+		const result = applyAdvice(null);
+		await vault.create(AGENTS_FILE, result.text);
+		action = result.action;
+	} else {
+		const current = await vault.read(file);
+		const result = applyAdvice(current);
+		action = result.action;
+		// Unchanged text isn't written. Otherwise re-applied to whatever process reads, so an edit
+		// since the read above is kept.
+		if (result.text !== current) {
+			await vault.process(file, (data) => {
+				const result = applyAdvice(data);
+				action = result.action;
+				return result.text;
+			});
+		}
+	}
+	const notice = action === "added" ? ADDED_NOTICE : UPDATED_NOTICE;
+	for (const path of CLAUDE_MD_FILES) {
+		if (await vault.adapter.exists(path)) return `${notice}. ${CLAUDE_MD_NOTE}`;
+	}
+	return notice;
 }

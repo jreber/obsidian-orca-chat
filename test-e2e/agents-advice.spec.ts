@@ -52,9 +52,12 @@ test("Append AGENTS.md advice writes the vault root's AGENTS.md: added once, the
 	const agentsFile = path.join(vaultDir, "AGENTS.md");
 	expect(existsSync(agentsFile)).toBe(false);
 
-	// Beside New session, same style, and the header fits at the default sidebar width.
+	// Beside New session as a plain, secondary button (New session stays the one CTA), with a
+	// tooltip, and the header fits at the default sidebar width.
 	await expect(adviceButton(obsidian)).toHaveText("Append AGENTS.md advice");
-	expect(await adviceButton(obsidian).getAttribute("class")).toContain("mod-cta");
+	await expect(adviceButton(obsidian)).not.toHaveClass(/mod-cta/);
+	await expect(newSessionButton(obsidian)).toHaveClass(/mod-cta/);
+	await expect(adviceButton(obsidian)).toHaveAttribute("title", /AGENTS\.md/);
 	expect(await newSessionButton(obsidian).evaluate((el) => el.nextElementSibling?.classList.contains("orca-chat-agents-advice"))).toBe(true);
 	await expectHeaderFits(obsidian);
 	await expectStatusFits(obsidian);
@@ -88,4 +91,14 @@ test("Append AGENTS.md advice writes the vault root's AGENTS.md: added once, the
 	await expect(statusLabel(obsidian)).toBeVisible();
 	await expect(obsidian.locator(".notice"), "notices gone before the screenshot").toHaveCount(0, { timeout: 15_000 });
 	await screenshotPane(obsidian, "agents-advice-header-narrow");
+});
+
+test("in a vault with a CLAUDE.md, the Notice says Claude Code may read that instead", async ({ obsidian, vaultDir }) => {
+	writeFileSync(path.join(vaultDir, "CLAUDE.md"), "# Mine\n");
+	await adviceButton(obsidian).click();
+	const notice = obsidian.locator(".notice", { hasText: "Added Orca Chat advice to AGENTS.md" });
+	await expect(notice).toContainText("This vault has a CLAUDE.md, and current Claude Code may read that instead of AGENTS.md.");
+	await expect.poll(() => existsSync(path.join(vaultDir, "AGENTS.md"))).toBe(true);
+	expect(readFileSync(path.join(vaultDir, "CLAUDE.md"), "utf8")).toBe("# Mine\n");
+	await screenshotPane(obsidian, "agents-advice-claude-md-notice");
 });

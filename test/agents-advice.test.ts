@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const { applyAdvice, adviceBlock, appendAgentsAdvice, ADVICE_START, ADVICE_END, ADDED_NOTICE, UPDATED_NOTICE } = await import(
+const { applyAdvice, adviceBlock, appendAgentsAdvice, ADVICE_START, ADVICE_END, ADDED_NOTICE, UPDATED_NOTICE, CLAUDE_MD_NOTE } = await import(
 	"../src/agents-advice.ts"
 );
 
@@ -68,39 +68,73 @@ test("a start marker without an end marker is refused rather than guessed at", (
 	assert.throws(() => applyAdvice(`x\n${ADVICE_START}\nhalf a block\n`), /end marker/);
 });
 
-function fakeAdapter(files: Record<string, string>) {
+// Obsidian's Vault as appendAgentsAdvice uses it: indexed files by path, process/create, and the
+// adapter's exists for unindexed paths such as .claude/.
+function fakeVault(files: Record<string, string>) {
 	const writes: [string, string][] = [];
+	const file = (path: string) => ({ path });
 	return {
 		files,
 		writes,
-		adapter: {
-			exists: async (p: string) => p in files,
-			read: async (p: string) => {
-				if (!(p in files)) throw new Error(`no ${p}`);
-				return files[p];
+		vault: {
+			getFileByPath: (p: string) => (p in files && !p.startsWith(".") ? file(p) : null),
+			read: async (f: { path: string }) => files[f.path],
+			process: async (f: { path: string }, fn: (data: string) => string) => {
+				const next = fn(files[f.path]);
+				writes.push([f.path, next]);
+				files[f.path] = next;
+				return next;
 			},
-			write: async (p: string, data: string) => {
+			create: async (p: string, data: string) => {
+				if (p in files) throw new Error("File already exists.");
 				writes.push([p, data]);
 				files[p] = data;
+				return file(p);
 			},
+			adapter: { exists: async (p: string) => p in files },
 		},
 	};
 }
 
 test("in the vault: adds, then updates; only AGENTS.md is written", async () => {
-	const { adapter, files, writes } = fakeAdapter({ "Note.md": "hello" });
+	const { vault, files, writes } = fakeVault({ "Note.md": "hello" });
 	assert.equal(ADDED_NOTICE, "Added Orca Chat advice to AGENTS.md");
 	assert.equal(UPDATED_NOTICE, "Updated Orca Chat advice in AGENTS.md");
-	assert.equal(await appendAgentsAdvice(adapter), ADDED_NOTICE);
+	assert.equal(await appendAgentsAdvice(vault), ADDED_NOTICE);
 	assert.equal(files["AGENTS.md"], BLOCK);
-	assert.equal(await appendAgentsAdvice(adapter), UPDATED_NOTICE);
+	assert.equal(await appendAgentsAdvice(vault), UPDATED_NOTICE);
 	assert.equal(files["AGENTS.md"], BLOCK);
 	assert.deepEqual(writes.map(([p]) => p), ["AGENTS.md"], "an unchanged block isn't rewritten");
 	assert.deepEqual(Object.keys(files).sort(), ["AGENTS.md", "Note.md"]);
 });
 
-test("in the vault: appends to an existing AGENTS.md", async () => {
-	const { adapter, files } = fakeAdapter({ "AGENTS.md": "Mine.\n" });
-	assert.equal(await appendAgentsAdvice(adapter), ADDED_NOTICE);
+test("in the vault: appends to an existing AGENTS.md through Vault#process", async () => {
+	const { vault, files, writes } = fakeVault({ "AGENTS.md": "Mine.\n" });
+	assert.equal(await appendAgentsAdvice(vault), ADDED_NOTICE);
 	assert.equal(files["AGENTS.md"], "Mine.\n\n" + BLOCK);
+	assert.equal(writes.length, 1);
+});
+
+test("an edit that lands before the write is kept: the advice is applied to what process reads", async () => {
+	const { vault, files } = fakeVault({ "AGENTS.md": "Mine.\n" });
+	const read = vault.read;
+	vault.read = async (f) => {
+		const text = await read(f);
+		files["AGENTS.md"] = "Mine, edited.\n";
+		return text;
+	};
+	await appendAgentsAdvice(vault);
+	assert.equal(files["AGENTS.md"], "Mine, edited.\n\n" + BLOCK);
+});
+
+test("a vault with a CLAUDE.md: the Notice says Claude Code may read that instead, and says nothing about imports", async () => {
+	for (const claudeMd of ["CLAUDE.md", ".claude/CLAUDE.md"]) {
+		const { vault, files } = fakeVault({ [claudeMd]: "# mine\n" });
+		const notice = await appendAgentsAdvice(vault);
+		assert.equal(notice, `${ADDED_NOTICE}. ${CLAUDE_MD_NOTE}`);
+		assert.equal(CLAUDE_MD_NOTE, "This vault has a CLAUDE.md, and current Claude Code may read that instead of AGENTS.md.");
+		assert.ok(!/@AGENTS|import/i.test(notice));
+		assert.equal(files[claudeMd], "# mine\n", "CLAUDE.md is never touched");
+		assert.equal(await appendAgentsAdvice(vault), `${UPDATED_NOTICE}. ${CLAUDE_MD_NOTE}`);
+	}
 });

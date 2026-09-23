@@ -19,7 +19,7 @@ after(() => dom.window.close());
 const obsidianFake = await import("./fakes/obsidian.ts");
 obsidianFake.installDomExtensions();
 const { WorkspaceLeaf, App, Plugin, FakeNoticeLog } = obsidianFake;
-const { OrcaChatView, ORCA_CHAT_VIEW_TYPE, interceptObsidianLinks, watchEmbedLoad } = await import(
+const { OrcaChatView, ORCA_CHAT_VIEW_TYPE, ADVICE_BUTTON_TOOLTIP, interceptObsidianLinks, watchEmbedLoad } = await import(
 	"../src/chat-view.ts"
 );
 const { shell } = await import("electron");
@@ -251,23 +251,43 @@ test("pane renders the New session button, status label and embed, with no sessi
 	assert.equal(view.contentEl.querySelector("select"), null);
 });
 
-// Beside New session: writes the plugin's advice block into the vault root's AGENTS.md.
-test("the Append AGENTS.md advice button sits right after New session and writes AGENTS.md", async () => {
+// A desktop App whose vault holds `files` (vault-relative path -> text), with the Vault calls the
+// advice button makes. `gate`, when given, holds every process/create until it resolves.
+function appWithVaultFiles(files: Record<string, string>, gate?: Promise<void>) {
 	const app = new App();
-	const files: Record<string, string> = { "AGENTS.md": "# Mine\n" };
-	const adapter = Object.assign(new obsidianFake.FileSystemAdapter("/vault"), {
-		exists: async (p: string) => p in files,
-		read: async (p: string) => files[p],
-		write: async (p: string, data: string) => void (files[p] = data),
+	const writes: string[] = [];
+	Object.assign(app.vault, {
+		adapter: Object.assign(new obsidianFake.FileSystemAdapter("/vault"), { exists: async (p: string) => p in files }),
+		getFileByPath: (p: string) => (p in files ? { path: p } : null),
+		read: async (f: { path: string }) => files[f.path],
+		process: async (f: { path: string }, fn: (data: string) => string) => {
+			await gate;
+			writes.push(f.path);
+			return (files[f.path] = fn(files[f.path]));
+		},
+		create: async (p: string, data: string) => {
+			await gate;
+			writes.push(p);
+			files[p] = data;
+		},
 	});
-	app.vault.adapter = adapter;
+	return { app, writes };
+}
+
+// Beside New session: writes the plugin's advice block into the vault root's AGENTS.md.
+test("the Append AGENTS.md advice button sits right after New session, is secondary, and writes AGENTS.md", async () => {
+	const files: Record<string, string> = { "AGENTS.md": "# Mine\n" };
+	const { app } = appWithVaultFiles(files);
 	const view = new OrcaChatView(new WorkspaceLeaf(), new Plugin(app));
 	await view.onOpen();
 	const newSession = view.contentEl.querySelector("button.orca-chat-new-session")!;
 	const advice = view.contentEl.querySelector("button.orca-chat-agents-advice") as HTMLButtonElement;
 	assert.equal(advice.textContent, "Append AGENTS.md advice");
 	assert.equal(newSession.nextElementSibling, advice);
-	assert.ok(advice.classList.contains("mod-cta"), "styled like New session");
+	assert.ok(newSession.classList.contains("mod-cta"), "New session is the pane's one CTA");
+	assert.ok(!advice.classList.contains("mod-cta"), "the advice button is a plain, secondary button");
+	assert.equal(advice.getAttribute("title"), ADVICE_BUTTON_TOOLTIP);
+	assert.match(ADVICE_BUTTON_TOOLTIP, /AGENTS\.md/);
 
 	FakeNoticeLog.length = 0;
 	advice.click();
@@ -278,6 +298,25 @@ test("the Append AGENTS.md advice button sits right after New session and writes
 	for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
 	assert.deepEqual(FakeNoticeLog, ["Added Orca Chat advice to AGENTS.md", "Updated Orca Chat advice in AGENTS.md"]);
 	assert.equal(files["AGENTS.md"].split("<!-- orca-chat:advice:start -->").length, 2);
+});
+
+test("Append AGENTS.md advice: a second click while the first is writing does nothing", async () => {
+	let release!: () => void;
+	const gate = new Promise<void>((r) => (release = r));
+	const files: Record<string, string> = {};
+	const { app, writes } = appWithVaultFiles(files, gate);
+	const view = new OrcaChatView(new WorkspaceLeaf(), new Plugin(app));
+	await view.onOpen();
+	const advice = view.contentEl.querySelector("button.orca-chat-agents-advice") as HTMLButtonElement;
+	FakeNoticeLog.length = 0;
+	const first = view.onAppendAgentsAdvice();
+	assert.equal(advice.disabled, true);
+	await view.onAppendAgentsAdvice();
+	release();
+	await first;
+	assert.equal(advice.disabled, false);
+	assert.deepEqual(writes, ["AGENTS.md"]);
+	assert.deepEqual(FakeNoticeLog, ["Added Orca Chat advice to AGENTS.md"]);
 });
 
 test("Append AGENTS.md advice needs desktop Obsidian", async () => {

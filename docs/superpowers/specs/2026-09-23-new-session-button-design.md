@@ -140,15 +140,22 @@ It also doesn't parse `[[wikilinks]]`: they render as literal text `[[Note]]`.
 ## Advice for the agent: AGENTS.md in the vault
 
 The chat session's working folder is the vault root, so standing guidance for the agent belongs in the
-vault's own `AGENTS.md`; files in the Orca or plugin repos are never read by it. The pane's header has
-an **Append AGENTS.md advice** button beside New session (same style; the header wraps in a narrow
-pane). It writes a block between `<!-- orca-chat:advice:start -->` and `<!-- orca-chat:advice:end -->`:
-be brief and conversational, and use inline `[[wikilinks]]` to existing notes where appropriate. It
-creates the file if it is missing, appends the block at the end after a blank line, or replaces an
-existing block in place (never a second copy). It never changes text outside the markers and keeps the
-file's line endings. A start marker without an end marker is refused. Notices: "Added Orca Chat
-advice to AGENTS.md" or "Updated Orca Chat advice in AGENTS.md". See
-[docs/vault-agents-advice.md](../../vault-agents-advice.md). There is no command-palette entry.
+vault's own `AGENTS.md`; files in the Orca or plugin repos are never read by it. Claude Code decides
+whether it reads that file: current Claude Code reads `AGENTS.md` only when the project has no
+`CLAUDE.md` of its own (its `instructionFiles` default), and older versions may not read `AGENTS.md`
+at all. The pane's header has an **Append AGENTS.md advice** button beside New session. It is a plain,
+secondary button (New session is the pane's one call to action) with a tooltip saying what it does;
+the header wraps in a narrow pane. It writes a block between `<!-- orca-chat:advice:start -->` and
+`<!-- orca-chat:advice:end -->`: be brief and conversational, and use inline `[[wikilinks]]` to
+existing notes where appropriate. It creates the file if it is missing (`Vault#create`), appends the
+block at the end after a blank line, or replaces an existing block in place (never a second copy); an
+existing file is changed through `Vault#process`, so an open editor's pending save isn't lost. It
+never changes text outside the markers and keeps the file's line endings. A start marker without an
+end marker is refused. The button is disabled while it writes. Notices: "Added Orca Chat advice to
+AGENTS.md" or "Updated Orca Chat advice in AGENTS.md"; when the vault root has a `CLAUDE.md` (or
+`.claude/CLAUDE.md`), the Notice adds "This vault has a CLAUDE.md, and current Claude Code may read
+that instead of AGENTS.md." See [docs/vault-agents-advice.md](../../vault-agents-advice.md). There is
+no command-palette entry.
 
 ## Versioning
 
