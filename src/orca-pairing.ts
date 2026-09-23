@@ -31,6 +31,7 @@ export function decodePairingUrl(url: string): PairedCredential {
 // room for future settings to live alongside pairedCredential.
 interface OrcaChatPluginData {
 	pairedCredential: PairedCredential | null;
+	lastSessionId?: string | null;
 }
 
 async function loadPluginData(plugin: Plugin): Promise<Partial<OrcaChatPluginData>> {
@@ -40,6 +41,15 @@ async function loadPluginData(plugin: Plugin): Promise<Partial<OrcaChatPluginDat
 export async function savePairedCredential(plugin: Plugin, credential: PairedCredential): Promise<void> {
 	const data = await loadPluginData(plugin);
 	await plugin.saveData({ ...data, pairedCredential: credential } satisfies OrcaChatPluginData);
+}
+
+export async function loadLastSessionId(plugin: Plugin): Promise<string | null> {
+	return (await loadPluginData(plugin)).lastSessionId ?? null;
+}
+
+export async function saveLastSessionId(plugin: Plugin, sessionId: string | null): Promise<void> {
+	const data = await loadPluginData(plugin);
+	await plugin.saveData({ ...data, pairedCredential: data.pairedCredential ?? null, lastSessionId: sessionId } satisfies OrcaChatPluginData);
 }
 
 export async function loadPairedCredential(plugin: Plugin): Promise<PairedCredential | null> {
