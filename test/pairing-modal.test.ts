@@ -33,6 +33,18 @@ test("the pairing modal lists the four steps for getting a \"This computer only\
 	assert.ok(list.compareDocumentPosition(input) & 4 /* DOCUMENT_POSITION_FOLLOWING */, "steps come before the input");
 });
 
+// Which build is installed, for bug reports: a small footer under the Pair button.
+test("the pairing modal ends with the plugin's version and build", async () => {
+	const { versionLabel } = await import("../src/version.ts");
+	const modal = new PairingModal(new App(), new Plugin(new App()));
+	modal.open();
+	const footer = modal.contentEl.querySelector(".orca-chat-version")!;
+	assert.equal(footer.textContent, versionLabel());
+	assert.equal(modal.contentEl.lastElementChild, footer, "the footer is the last thing in the dialog");
+	const button = modal.contentEl.querySelector("button.mod-cta")!;
+	assert.ok(button.compareDocumentPosition(footer) & 4 /* DOCUMENT_POSITION_FOLLOWING */, "the footer comes after the Pair button");
+});
+
 const { encodePairingOffer } = await import("../src/orca-remote/pairing.ts");
 const { FakeOrcaServer } = await import("../test-e2e/protocol/fake-orca-server.ts");
 

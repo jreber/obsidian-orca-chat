@@ -6,11 +6,13 @@ import { buildFlashcardAskMessage, FlashcardContext, isReviewModalOpen, resolveC
 import { ORCA_CHAT_VIEW_TYPE, OrcaChatView, reloadChatViewCredentials } from "./chat-view";
 import { PairingModal } from "./pairing-modal";
 import { getVaultRootPath } from "./vault-path";
+import { versionLabel } from "./version";
 
 const ORCA_LINE_TAG_ATTR = "orcaLine";
 
 export default class OrcaChatPlugin extends Plugin {
 	async onload() {
+		console.info(`[orca-chat] ${versionLabel()}`);
 		this.registerView(ORCA_CHAT_VIEW_TYPE, (leaf) => new OrcaChatView(leaf, this));
 
 		this.addCommand({

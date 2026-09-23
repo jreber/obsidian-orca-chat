@@ -1,5 +1,6 @@
 import { App, Modal, Notice, Plugin } from "obsidian";
 import { decodePairingUrl, savePairedCredential } from "./orca-pairing";
+import { versionLabel } from "./version";
 
 const PAIRING_STEPS = [
 	"In Orca, open Settings and find \"Remote server workflow\".",
@@ -32,6 +33,8 @@ export class PairingModal extends Modal {
 
 		const buttonRow = contentEl.createDiv();
 		const pairButton = buttonRow.createEl("button", { text: "Pair", cls: "mod-cta" });
+		// Which build is installed, for bug reports.
+		contentEl.createDiv({ cls: "orca-chat-version", text: versionLabel() });
 
 		let submitting = false;
 		const submit = async () => {

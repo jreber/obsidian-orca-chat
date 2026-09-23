@@ -1,7 +1,7 @@
 {
 	"id": "orca-chat",
 	"name": "Orca Chat",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"minAppVersion": "1.4.0",
 	"description": "A Claude chat rooted at your vault, run by Orca, inside Obsidian.",
 	"author": "James Reber",

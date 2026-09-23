@@ -38,3 +38,10 @@
 	height: 100%;
 	border: none;
 }
+
+.orca-chat-version {
+	margin-top: 12px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	user-select: text;
+}
