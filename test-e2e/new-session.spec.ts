@@ -155,7 +155,7 @@ test("a refused create reports Orca's reason and stores nothing", async ({ serve
 	await newSessionButton(obsidian).click();
 
 	await expect(obsidian.locator(".notice", { hasText: "nope" })).toBeVisible();
-	await expect(statusLabel(obsidian)).toHaveText("⚠ Couldn't create a session");
+	await expect(statusLabel(obsidian)).toHaveText("⚠ Session not created");
 	await expectStatusFits(obsidian);
 	await expect(chatWebview(obsidian)).toHaveCount(0);
 	expect(await storedSessionId(obsidian)).toBeNull();
