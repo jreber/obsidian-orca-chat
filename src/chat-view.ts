@@ -188,6 +188,19 @@ export class OrcaChatView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.forgetConnection();
+	}
+
+	// Re-reads the pairing and starts over as a reopened pane would (after Pair with Orca, so a
+	// re-pair takes effect without reopening the pane).
+	async reloadCredential(): Promise<void> {
+		this.forgetConnection();
+		this.statusLabel.setText("");
+		await this.initializeRemote();
+	}
+
+	// Drops the session, client and credential; in-flight work sees the generation change.
+	private forgetConnection(): void {
 		this.generation++;
 		this.teardownWebview();
 		this.remoteClient?.disconnect();

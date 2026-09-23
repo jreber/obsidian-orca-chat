@@ -3,10 +3,13 @@ import { decodePairingUrl, savePairedCredential } from "./orca-pairing";
 
 export class PairingModal extends Modal {
 	private plugin: Plugin;
+	// Called after a successful pair, once the credential is saved (the plugin refreshes open panes).
+	private onPaired?: () => void | Promise<void>;
 
-	constructor(app: App, plugin: Plugin) {
+	constructor(app: App, plugin: Plugin, onPaired?: () => void | Promise<void>) {
 		super(app);
 		this.plugin = plugin;
+		this.onPaired = onPaired;
 	}
 
 	onOpen(): void {
@@ -36,6 +39,7 @@ export class PairingModal extends Modal {
 				await savePairedCredential(this.plugin, credential);
 				new Notice("Paired with Orca");
 				this.close();
+				await this.onPaired?.();
 			} catch (err) {
 				new Notice(err instanceof Error ? err.message : "Failed to pair with Orca");
 			} finally {

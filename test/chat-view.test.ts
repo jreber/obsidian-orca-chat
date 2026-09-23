@@ -1042,3 +1042,28 @@ test("New session: a stored-id write failure still mounts the created chat and s
 	assert.equal(statusText(view), "Connecting…");
 	assert.deepEqual(FakeNoticeLog, ["Orca Chat: chat created, but this pane couldn't remember it after a restart"]);
 });
+
+// --- Re-pairing refreshes open panes (final review M4) ---
+
+test("reloadCredential picks up a pairing saved after the pane opened", async () => {
+	const app = new App();
+	app.vault.adapter = new obsidianFake.FileSystemAdapter("/vault");
+	const plugin = new Plugin(app);
+	const view = new OrcaChatView(new WorkspaceLeaf(), plugin);
+	await view.onOpen();
+	await flush();
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.ok(FakeNoticeLog.some((m) => /Not paired/.test(m)), "unpaired before the reload");
+	const { savePairedCredential } = await import("../src/orca-pairing.ts");
+	await savePairedCredential(plugin as never, FAKE_CREDENTIAL as never);
+	await view.reloadCredential();
+	assert.equal(statusText(view), "No session yet");
+	FakeNoticeLog.length = 0;
+	const { client, calls } = fakeCreateClient();
+	view.setClientForTest(client); // stands in for the reachable Orca the new pairing points at
+	await view.onNewSession();
+	assert.ok(!FakeNoticeLog.some((m) => /Not paired/.test(m)), FakeNoticeLog.join(" | "));
+	assert.ok(calls.includes("createClaudeSession"));
+	await view.onClose();
+});
