@@ -3,6 +3,7 @@ import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/obsidian-fixture";
 import {
 	chatWebview,
+	expectStatusFits,
 	newSessionButton,
 	registerVault,
 	reopenPane,
@@ -14,7 +15,7 @@ import {
 } from "./helpers/pane";
 import { computeAgentSessionPayloadFingerprint } from "../src/orca-remote/agent-session-mutation-envelope";
 
-const NO_SESSION = "No session — click New session";
+const NO_SESSION = "No session yet";
 // Stands in for Orca's single-session page so mounted chats reach "● Live chat".
 const EMBED_PAGE = { html: "<!doctype html><title>Orca Session</title><body><h1>Embedded Orca chat</h1></body>" };
 
@@ -39,6 +40,7 @@ test("registered vault: New session creates a Claude chat in the vault's workspa
 	// reports is the host directory the fixture created.
 	expect(vaultPath).toBe(realpathSync(vaultDir));
 	await expect(statusLabel(obsidian)).toHaveText(NO_SESSION);
+	await expectStatusFits(obsidian);
 	await screenshotPane(obsidian, "new-session-initial");
 
 	await startNewSession(obsidian, server, vaultPath);
@@ -76,6 +78,8 @@ test("unregistered vault: confirming the prompt adds the vault as a folder proje
 	const modal = addProjectModal(obsidian);
 	await expect(modal).toBeVisible();
 	await expect(modal).toContainText(vaultPath);
+	// Nothing is being created until the user confirms.
+	await expect(statusLabel(obsidian)).toHaveText(NO_SESSION);
 	await screenshotWindow(obsidian, "new-session-add-project-modal");
 	await modal.getByRole("button", { name: "Add to Orca" }).click();
 
@@ -88,6 +92,7 @@ test("unregistered vault: confirming the prompt adds the vault as a folder proje
 	expect(createCalls(server)).toHaveLength(1);
 	expect(createCalls(server)[0]).toMatchObject({ worktree: "id:ws-added", agent: "claude" });
 	await expect(statusLabel(obsidian)).toHaveText("● Live chat");
+	await expectStatusFits(obsidian);
 	await screenshotPane(obsidian, "new-session-live");
 });
 
@@ -151,6 +156,7 @@ test("a refused create reports Orca's reason and stores nothing", async ({ serve
 
 	await expect(obsidian.locator(".notice", { hasText: "nope" })).toBeVisible();
 	await expect(statusLabel(obsidian)).toHaveText("⚠ Couldn't create a session");
+	await expectStatusFits(obsidian);
 	await expect(chatWebview(obsidian)).toHaveCount(0);
 	expect(await storedSessionId(obsidian)).toBeNull();
 

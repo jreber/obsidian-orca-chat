@@ -1,12 +1,13 @@
 import { writeFileSync } from "node:fs";
 import { test, expect } from "./helpers/obsidian-fixture";
-import { SCREENSHOT_DIR, screenshotPane, startNewSession, statusLabel } from "./helpers/pane";
+import { SCREENSHOT_DIR, expectStatusFits, screenshotPane, startNewSession, statusLabel } from "./helpers/pane";
 
 test("a 404 from Orca's embed page is reported as a failed load, not a live chat", async ({ server, obsidian, vaultPath }) => {
 	server.setEmbedPage("missing");
 	await startNewSession(obsidian, server, vaultPath);
 
 	await expect(statusLabel(obsidian)).toHaveText("⚠ Chat failed to load");
+	await expectStatusFits(obsidian);
 	await expect(obsidian.locator(".notice", { hasText: "couldn't load the chat" })).toContainText("404");
 	await screenshotPane(obsidian, "404");
 });

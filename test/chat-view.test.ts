@@ -23,6 +23,7 @@ const { OrcaChatView, ORCA_CHAT_VIEW_TYPE, interceptObsidianLinks, watchEmbedLoa
 	"../src/chat-view.ts"
 );
 const { shell } = await import("electron");
+const { OrcaRemoteError } = await import("../src/orca-remote-client.ts");
 
 function makeView() {
 	return new OrcaChatView(new WorkspaceLeaf(), new Plugin(new App()));
@@ -214,7 +215,7 @@ test("no stored session: shows the button state, mounts nothing", async () => {
 	await view.restoreLastSession();
 	assert.equal(view.getSelectedHandle(), null);
 	assert.equal(view.contentEl.querySelector("webview"), null);
-	assert.match(view.contentEl.querySelector(".orca-chat-status-label")!.textContent ?? "", /New session/);
+	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "No session yet");
 });
 
 test("stored session still in Orca: reattaches and mounts its webview", async () => {
@@ -271,7 +272,7 @@ test("existence check: a vanished session is torn down, cleared and announced", 
 	assert.equal(view.contentEl.querySelector("webview"), null);
 	assert.equal(view.getStoredSessionIdForTest(), null);
 	assert.ok(FakeNoticeLog.some((m) => /session ended/i.test(m)));
-	assert.match(view.contentEl.querySelector(".orca-chat-status-label")!.textContent ?? "", /New session/);
+	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "No session yet");
 });
 
 test("existence check: a transient list error leaves the session alone, with no Notice", async () => {
@@ -297,6 +298,7 @@ function fakeCreateClient(overrides: Record<string, unknown> = {}) {
 	const calls: string[] = [];
 	const client = {
 		listAllAgentSessionTabs: async () => [],
+		disconnect: () => {},
 		listRepos: async () => {
 			calls.push("listRepos");
 			return [{ id: "r1", path: "/vault", displayName: "Vault" }];
@@ -415,7 +417,7 @@ test("New session: declining the add-project prompt creates nothing and shows no
 	assert.deepEqual(FakeNoticeLog, []);
 	assert.equal(view.getSelectedHandle(), null);
 	assert.equal(view.getStoredSessionIdForTest(), null);
-	assert.match(view.contentEl.querySelector(".orca-chat-status-label")!.textContent ?? "", /New session/);
+	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "No session yet");
 });
 
 test("New session: a failure Notices, shows the warning status and stores nothing", async () => {
@@ -478,4 +480,256 @@ test("New session: paired but Orca unreachable says so and creates nothing", asy
 	await view.onNewSession();
 	assert.ok(FakeNoticeLog.some((m) => /can't reach Orca/i.test(m)));
 	assert.equal(view.getSelectedHandle(), null);
+});
+
+// --- Races, stale results and close (review M1–M4) ---
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (err: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+// Lets pending promise chains (fake RPCs, plugin data reads/writes) run to their next await.
+async function flush() {
+	for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+const statusText = (view: InstanceType<typeof OrcaChatView>) =>
+	view.contentEl.querySelector(".orca-chat-status-label")!.textContent;
+
+// Makes the next AddProjectModal stay open and hands it back, instead of the fake Modal's default.
+function captureNextModal() {
+	const originalOpen = obsidianFake.Modal.prototype.open;
+	const captured: { modal: InstanceType<typeof obsidianFake.Modal> | null } = { modal: null };
+	obsidianFake.Modal.prototype.open = function (this: InstanceType<typeof obsidianFake.Modal>) {
+		originalOpen.call(this);
+		captured.modal = this;
+	};
+	return { captured, restore: () => (obsidianFake.Modal.prototype.open = originalOpen) };
+}
+
+// A desktop view backed by the fake plugin's real loadData/saveData (not the stored-id override),
+// so the stored id goes through saveLastSessionId's read-modify-write like it does in Obsidian.
+async function openDesktopViewWithData(data: Record<string, unknown>) {
+	const app = new App();
+	app.vault.adapter = new obsidianFake.FileSystemAdapter("/vault");
+	const plugin = new Plugin(app);
+	await plugin.saveData(data);
+	const view = new OrcaChatView(new WorkspaceLeaf(), plugin);
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const storedId = async () => ((await plugin.loadData()) as { lastSessionId?: string | null }).lastSessionId ?? null;
+	return { view, plugin, storedId };
+}
+
+test("New session: 'Creating session…' only shows once the add-project prompt is confirmed", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const created = deferred<{ sessionId: string }>();
+	const { client } = fakeCreateClient({ listRepos: async () => [], createClaudeSession: () => created.promise });
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	await view.restoreLastSession();
+	const { captured, restore } = captureNextModal();
+	try {
+		const creating = view.onNewSession();
+		await flush();
+		assert.ok(captured.modal, "the add-project prompt opened");
+		assert.equal(statusText(view), "No session yet");
+		(captured.modal!.contentEl.querySelector("button.mod-cta") as HTMLButtonElement).click();
+		await flush();
+		assert.equal(statusText(view), "Creating session…");
+		created.resolve({ sessionId: "new1" });
+		await creating;
+		assert.equal(statusText(view), "Connecting…");
+	} finally {
+		restore();
+	}
+});
+
+test("a slow restore that finishes after New session leaves the new session stored and mounted", async () => {
+	const { view, storedId } = await openDesktopViewWithData({ lastSessionId: "s1" });
+	const listed = deferred<unknown[]>();
+	let first = true;
+	const { client } = fakeCreateClient({
+		listAllAgentSessionTabs: () => (first ? ((first = false), listed.promise) : Promise.resolve([])),
+	});
+	view.setClientForTest(client);
+	FakeNoticeLog.length = 0;
+	const restoring = view.restoreLastSession();
+	await flush();
+	await view.onNewSession();
+	assert.equal(await storedId(), "new1");
+	listed.resolve([]); // s1 is gone — but the user has already moved on to new1
+	await restoring;
+	assert.equal(await storedId(), "new1");
+	assert.equal(view.getSelectedHandle(), "new1");
+	assert.equal(view.contentEl.querySelector("webview")?.getAttribute("data-orca-session-id"), "new1");
+	assert.equal(statusText(view), "Connecting…");
+	assert.ok(!FakeNoticeLog.some((m) => /ended/i.test(m)), `unexpected Notice: ${FakeNoticeLog.join(" | ")}`);
+});
+
+test("a restore's clear still being written can't overwrite the id New session stores after it", async () => {
+	const { view, plugin, storedId } = await openDesktopViewWithData({ lastSessionId: "s1" });
+	const { client } = fakeCreateClient(); // listAll → [] so the restore clears s1
+	view.setClientForTest(client);
+	const realSave = plugin.saveData.bind(plugin);
+	const heldSave = deferred<void>();
+	let saves = 0;
+	plugin.saveData = async (data: unknown) => {
+		if (saves++ === 0) await heldSave.promise; // the restore's clear lands late
+		return realSave(data);
+	};
+	FakeNoticeLog.length = 0;
+	const restoring = view.restoreLastSession();
+	await flush();
+	assert.equal(saves, 1, "the restore is mid-write");
+	const creating = view.onNewSession();
+	await flush();
+	heldSave.resolve();
+	await Promise.all([restoring, creating]);
+	assert.equal(await storedId(), "new1");
+	assert.equal(view.getSelectedHandle(), "new1");
+	assert.equal(statusText(view), "Connecting…");
+	assert.ok(!FakeNoticeLog.some((m) => /ended/i.test(m)), `unexpected Notice: ${FakeNoticeLog.join(" | ")}`);
+});
+
+test("cancelling New session shows the current load state, not the one at click time", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const { client, calls } = fakeCreateClient({
+		listRepos: async () => [],
+		listAllAgentSessionTabs: async () => [{ sessionId: "s1", agent: "claude", title: "t" }],
+	});
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(statusText(view), "Connecting…");
+	const { captured, restore } = captureNextModal();
+	try {
+		const creating = view.onNewSession();
+		await flush();
+		assert.ok(captured.modal);
+		// The mounted chat finishes loading while the prompt is up.
+		view.contentEl.querySelector("webview")!.dispatchEvent(new Event("did-finish-load"));
+		captured.modal!.close();
+		await creating;
+	} finally {
+		restore();
+	}
+	assert.deepEqual(calls, []);
+	assert.equal(statusText(view), "● Live chat");
+	assert.equal(view.getSelectedHandle(), "s1");
+});
+
+test("a New session that resolves after the pane closed mounts nothing and shows no Notice", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const created = deferred<{ sessionId: string }>();
+	const { client } = fakeCreateClient({ createClaudeSession: () => created.promise });
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	const creating = view.onNewSession();
+	await flush();
+	await view.onClose();
+	FakeNoticeLog.length = 0;
+	created.resolve({ sessionId: "new1" });
+	await creating;
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(view.contentEl.querySelector("webview"), null);
+	assert.deepEqual(FakeNoticeLog, []);
+});
+
+test("a New session that fails after the pane closed shows no Notice", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const created = deferred<{ sessionId: string }>();
+	const { client } = fakeCreateClient({ createClaudeSession: () => created.promise });
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	const creating = view.onNewSession();
+	await flush();
+	await view.onClose();
+	FakeNoticeLog.length = 0;
+	created.reject(new OrcaRemoteError("refused"));
+	await creating;
+	assert.deepEqual(FakeNoticeLog, []);
+});
+
+test("a restore that resolves after the pane closed neither mounts nor clears nor Notices", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const listed = deferred<unknown[]>();
+	view.setClientForTest({ listAllAgentSessionTabs: () => listed.promise, disconnect: () => {} });
+	view.setStoredSessionIdForTest("s1");
+	const restoring = view.restoreLastSession();
+	await flush();
+	await view.onClose();
+	FakeNoticeLog.length = 0;
+	listed.resolve([]);
+	await restoring;
+	assert.deepEqual(FakeNoticeLog, []);
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	assert.equal(view.getSelectedHandle(), null);
+});
+
+test("a restore that finds its session after the pane closed mounts nothing", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const listed = deferred<unknown[]>();
+	view.setClientForTest({ listAllAgentSessionTabs: () => listed.promise, disconnect: () => {} });
+	view.setStoredSessionIdForTest("s1");
+	const restoring = view.restoreLastSession();
+	await flush();
+	await view.onClose();
+	listed.resolve([{ sessionId: "s1", agent: "claude", title: "t" }]);
+	await restoring;
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(view.contentEl.querySelector("webview"), null);
+});
+
+test("onClose forgets the client and session, so reopening initializes again", async () => {
+	const view = makeView();
+	await view.onOpen();
+	let disconnected = 0;
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	view.setClientForTest({
+		listAllAgentSessionTabs: async () => [{ sessionId: "s1", agent: "claude", title: "t" }],
+		disconnect: () => disconnected++,
+	});
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(view.getSelectedHandle(), "s1");
+	await view.onClose();
+	assert.equal(disconnected, 1);
+	assert.equal(view.getSelectedHandle(), null);
+	await view.onOpen();
+	await flush();
+	// The fake plugin has no pairedCredential, so a fresh initialization finds none; the stored-id
+	// override still says s1, which it keeps.
+	assert.equal(statusText(view), "Not paired with Orca");
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	assert.equal(view.getSelectedHandle(), null);
+});
+
+test("restore with no client (unpaired or connect failed) keeps the stored id", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(statusText(view), "Can't reach Orca");
 });

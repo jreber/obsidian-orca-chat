@@ -26,13 +26,15 @@ export async function createVaultSession(args: {
 	vaultPath: string;
 	vaultName: string;
 	confirmAddProject: () => Promise<boolean>;
+	// Called once, when creation is actually underway: the vault is registered, or the user has
+	// just confirmed adding it. Never called if the user declines.
+	onCreating?: () => void;
 }): Promise<{ sessionId: string }> {
 	const { client, vaultPath } = args;
-	let repo = findVaultRepo(await client.listRepos(), vaultPath);
-	if (!repo) {
-		if (!(await args.confirmAddProject())) throw new NewSessionCancelled();
-		repo = await client.addFolderRepo(vaultPath, args.vaultName);
-	}
+	const found = findVaultRepo(await client.listRepos(), vaultPath);
+	if (!found && !(await args.confirmAddProject())) throw new NewSessionCancelled();
+	args.onCreating?.();
+	const repo = found ?? (await client.addFolderRepo(vaultPath, args.vaultName));
 	const workspaces = await client.listWorkspaces(repo.id);
 	const wanted = normalizeVaultPath(vaultPath);
 	const workspace = workspaces.find((w) => normalizeVaultPath(w.path) === wanted) ?? workspaces[0];

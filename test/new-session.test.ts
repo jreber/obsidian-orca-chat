@@ -61,3 +61,36 @@ test("listRepos failure propagates and nothing is added or created", async () =>
 	await assert.rejects(createVaultSession(args(client)), /offline/);
 	assert.deepEqual(log, []);
 });
+
+// onCreating marks the point creation is actually underway (the pane shows "Creating session…"
+// from it), so it must not fire while the add-project prompt is still open or after a decline.
+test("onCreating: registered vault calls it once, before the workspace lookup", async () => {
+	const log: string[] = [];
+	await createVaultSession({ ...args(fakeClient({}, log)), onCreating: () => log.push("onCreating") });
+	assert.deepEqual(log, ["listRepos", "onCreating", "workspaces r1", "create ws-r1"]);
+});
+
+test("onCreating: unregistered vault calls it once, only after the prompt is confirmed", async () => {
+	const log: string[] = [];
+	const client = fakeClient({ listRepos: async () => (log.push("listRepos"), []) }, log);
+	const confirm = async () => (log.push("confirm"), true);
+	await createVaultSession({ ...args(client, confirm), onCreating: () => log.push("onCreating") });
+	assert.deepEqual(log, ["listRepos", "confirm", "onCreating", "add /v/ My Vault", "workspaces r2", "create ws-r2"]);
+});
+
+test("onCreating: never called when the prompt is declined", async () => {
+	let calls = 0;
+	const client = fakeClient({ listRepos: async () => [] });
+	await assert.rejects(
+		createVaultSession({ ...args(client, async () => false), onCreating: () => calls++ }),
+		NewSessionCancelled,
+	);
+	assert.equal(calls, 0);
+});
+
+test("onCreating: never called when listRepos fails", async () => {
+	let calls = 0;
+	const client = fakeClient({ listRepos: async () => { throw new Error("offline"); } });
+	await assert.rejects(createVaultSession({ ...args(client), onCreating: () => calls++ }), /offline/);
+	assert.equal(calls, 0);
+});

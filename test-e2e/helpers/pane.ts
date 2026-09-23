@@ -16,6 +16,17 @@ export async function screenshotWindow(obsidian: Page, name: string): Promise<vo
 }
 
 export const statusLabel = (obsidian: Page) => obsidian.locator(".orca-chat-status-label");
+
+// The status label ellipsizes text wider than the room beside the New session button; every
+// status must fit at the default sidebar width.
+export async function expectStatusFits(obsidian: Page): Promise<void> {
+	const { text, scrollWidth, clientWidth } = await statusLabel(obsidian).evaluate((el) => ({
+		text: el.textContent,
+		scrollWidth: el.scrollWidth,
+		clientWidth: el.clientWidth,
+	}));
+	expect(scrollWidth, `status "${text}" is truncated`).toBeLessThanOrEqual(clientWidth);
+}
 export const newSessionButton = (obsidian: Page) => obsidian.locator(".orca-chat-new-session");
 export const chatWebview = (obsidian: Page) => obsidian.locator("webview.orca-chat-webview");
 
