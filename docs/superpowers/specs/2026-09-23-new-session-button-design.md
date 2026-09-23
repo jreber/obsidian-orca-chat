@@ -50,7 +50,10 @@ respect (tab in Orca, Agent Dashboard card, history), and the pane embeds it exa
    success, so a slow create never leaves an orphaned chat in Orca; only if neither finds it does the
    pane show "⚠ Session not created".
 6. Persist the session id as this device's last session (see Storage). Mount the embed.
-   Orca's seed-turn fix means the session appears on the Agent Dashboard immediately.
+   The plugin sends no message on the user's behalf: a just-created chat has no turns. Orca lists
+   it at once as a ready row (status null on the wire; an Idle "Claude Chat" card on the Agent
+   Dashboard), so `session.tabs.listAll`, reattach and the 15 s liveness check see it; the user's
+   first message is the chat's first turn.
 
 ## Pane behavior
 
@@ -111,8 +114,10 @@ declining the add-project prompt is not an error: nothing is created and no Noti
   after reload; session vanished; not paired.
 - **Combined end to end:** real Obsidian with the plugin paired to a real Orca (worktree build,
   isolated data folder, stub Claude). Click New session; the same session appears in the Obsidian pane
-  and on Orca's dashboard. This also settles live that the plugin's client may call
-  `repo.add`/`worktree.list`. The plugin only ever sends `id:` selectors.
+  and on Orca's dashboard, with no user turn in it; the pane stays live past a 15 s liveness tick
+  with no turn; then a message typed into the embed is the chat's first turn. This also settles live
+  that the plugin's client may call `repo.add`/`worktree.list`. The plugin only ever sends `id:`
+  selectors.
 - **Cannot be tested on the Linux dev machine (verify on the Mac):** macOS default paths, the real
   `~/bin/local-claude`, and case-only path differences on macOS's case-insensitive filesystem
   (`/Users/x/Vault` vs `/users/x/vault` would register twice, because POSIX paths compare in exact
@@ -169,7 +174,8 @@ It also doesn't parse `[[wikilinks]]`: they render as literal text `[[Note]]`.
   (`no note named "…" in this vault`).
 - Tests: jsdom unit tests of the guest script and the host core; a fake-server Playwright spec; and
   the real-Orca spec, where the stub Claude answers with `See [[Welcome]] and [[Missing note]].`
-  (Orca's `CLAUDE_STUB_REPLY`, added for this) and both are checked in the real transcript.
+  (Orca's `CLAUDE_STUB_REPLY`, added for this). The test types a first message into the embed's
+  composer, and both links are checked in the real reply.
 
 ## Advice for the agent: AGENTS.md in the vault
 
@@ -201,12 +207,11 @@ files have uncommitted changes, `unknown` without git), and `versionLabel()`
 
 ## Known limitations and follow-ups
 
+- A chat created by New session appears in Orca's sidebar at once. On the Agent Dashboard it is an
+  Idle card, which shows only when the dashboard's **Show idle agents** setting (in its Board
+  settings menu) is on; it is off by default.
 - macOS's case-insensitive filesystem: a vault opened under a differently-cased path registers as a second
   project (same as Orca's own comparison).
-- Orca seeds every `agentSession.create` with a short first turn so the chat appears on the Agent
-  Dashboard immediately. That applies to all clients of the create RPC (Orca's own new-chat flows and
-  mobile as well as this plugin), and a prompt sent with the chat waits behind the seed turn. If that is
-  unwanted, make the seed opt-in through an optional create field only the plugin sends.
 - If the Claude binary is missing, Orca reports "claude stream-json exited" rather than saying it was not
   found.
 - The Windows override case and the `.cmd` wrapper are untested.
@@ -228,8 +233,11 @@ files have uncommitted changes, `unknown` without git), and `versionLabel()`
    pair each computer with its own Orca. An existing pairing from an earlier build is moved out of
    `data.json` automatically on first load; nothing to do. Needs Obsidian 1.8.7 or later.
 4. Open the Orca Chat pane and click **New session**. Approve "Add this vault to Orca?" once.
-5. Expect: "Connecting…" then "● Live chat"; the chat visible in the pane; the vault as a project and a
-   "Claude Chat" card on Orca's Agent Dashboard. Reopening the pane reattaches to the same chat.
+5. Expect: "Connecting…" then "● Live chat"; the chat visible in the pane, empty until you write the
+   first message; the vault as a project and the chat in Orca's sidebar. Reopening the pane
+   reattaches to the same chat. On the Agent Dashboard the new chat is an Idle "Claude Chat" card,
+   shown only when the dashboard's **Show idle agents** setting (Board settings) is on; it is off by
+   default.
 6. Optional: click **Append AGENTS.md advice** in the pane so new chats link notes as clickable
    `[[wikilinks]]` (see [docs/vault-agents-advice.md](../../vault-agents-advice.md)). The Pair with
    Orca dialog's footer shows the installed version and build (`Orca Chat v0.2.0 (<hash>)`).
