@@ -37,8 +37,9 @@ test("registered vault: New session creates a Claude chat in the vault's workspa
 	vaultPath,
 }) => {
 	// The flatpak sandbox exposes the home directory at the same path, so the vault root Obsidian
-	// reports is the host directory the fixture created.
-	expect(vaultPath).toBe(realpathSync(vaultDir));
+	// reports is the host directory the fixture created. Both sides are resolved: on macOS the temp
+	// directory is behind a symlink (/var -> /private/var).
+	expect(realpathSync(vaultPath)).toBe(realpathSync(vaultDir));
 	await expect(statusLabel(obsidian)).toHaveText(NO_SESSION);
 	await expectStatusFits(obsidian);
 	await screenshotPane(obsidian, "new-session-initial");
@@ -101,6 +102,25 @@ test("unregistered vault: cancelling the prompt creates nothing and shows no not
 	const modal = addProjectModal(obsidian);
 	await expect(modal).toBeVisible();
 	await modal.getByRole("button", { name: "Cancel" }).click();
+
+	await expect(modal).toHaveCount(0);
+	await expect(statusLabel(obsidian)).toHaveText(NO_SESSION);
+	await expect(newSessionButton(obsidian)).toBeEnabled();
+	expect(server.received("repo.add")).toHaveLength(0);
+	expect(server.received("agentSession.create")).toHaveLength(0);
+	await expect(chatWebview(obsidian)).toHaveCount(0);
+	await expect(obsidian.locator(".notice")).toHaveCount(0);
+});
+
+// Escape closes the modal through Obsidian's own close path (onClose), not the Cancel button.
+test("unregistered vault: dismissing the prompt with Escape creates nothing and shows no notice", async ({
+	server,
+	obsidian,
+}) => {
+	await newSessionButton(obsidian).click();
+	const modal = addProjectModal(obsidian);
+	await expect(modal).toBeVisible();
+	await obsidian.keyboard.press("Escape");
 
 	await expect(modal).toHaveCount(0);
 	await expect(statusLabel(obsidian)).toHaveText(NO_SESSION);

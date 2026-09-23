@@ -17,15 +17,22 @@ class AddProjectModal extends Modal {
 		add.onclick = () => this.finish(true);
 		cancel.onclick = () => this.finish(false);
 	}
+	// Obsidian calls this for every close, including Escape and a click outside: an unanswered
+	// prompt is a decline. It must not call close() itself (it is already inside close()).
 	onClose(): void {
 		this.contentEl.empty();
-		this.finish(false);
+		this.settle(false);
 	}
 	private finish(ok: boolean): void {
-		if (this.settled) return;
+		if (!this.settle(ok)) return;
+		this.close();
+	}
+	// Reports the answer once; returns whether this call was the one that did.
+	private settle(ok: boolean): boolean {
+		if (this.settled) return false;
 		this.settled = true;
 		this.done(ok);
-		this.close();
+		return true;
 	}
 }
 
