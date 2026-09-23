@@ -19,8 +19,8 @@ test("Pair with Orca shows the four steps above the paste box", async ({ obsidia
 	await expect(steps).toHaveText([
 		'In Orca, open Settings and find "Remote server workflow".',
 		'Choose "Share this host".',
-		'Under "Where will this link be opened?", pick "This computer only" (not Orca Mobile).',
-		"Generate the link, then paste it below. Use only the newest link.",
+		'Under "Where will this link be opened?", pick "This computer only".',
+		'Click "Generate Access Link", then paste the link below. Use only the newest link.',
 	]);
 
 	// Steps read top to bottom, then the paste box, then the Pair button, then the version footer.

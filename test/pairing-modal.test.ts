@@ -25,8 +25,8 @@ test("the pairing modal lists the four steps for getting a \"This computer only\
 	assert.deepEqual(steps, [
 		"In Orca, open Settings and find \"Remote server workflow\".",
 		"Choose \"Share this host\".",
-		"Under \"Where will this link be opened?\", pick \"This computer only\" (not Orca Mobile).",
-		"Generate the link, then paste it below. Use only the newest link.",
+		"Under \"Where will this link be opened?\", pick \"This computer only\".",
+		"Click \"Generate Access Link\", then paste the link below. Use only the newest link.",
 	]);
 	const list = modal.contentEl.querySelector("ol")!;
 	const input = modal.contentEl.querySelector("input")!;

@@ -5,8 +5,8 @@ import { versionLabel } from "./version";
 const PAIRING_STEPS = [
 	"In Orca, open Settings and find \"Remote server workflow\".",
 	"Choose \"Share this host\".",
-	"Under \"Where will this link be opened?\", pick \"This computer only\" (not Orca Mobile).",
-	"Generate the link, then paste it below. Use only the newest link.",
+	"Under \"Where will this link be opened?\", pick \"This computer only\".",
+	"Click \"Generate Access Link\", then paste the link below. Use only the newest link.",
 ];
 
 export class PairingModal extends Modal {
