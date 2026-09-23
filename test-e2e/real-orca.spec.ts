@@ -23,8 +23,10 @@ import {
 } from "../src/orca-remote/protocol-version";
 
 const E2E_ROOT = path.join(homedir(), ".cache", "orca-chat-e2e");
-const SEED_TEXT = "You've just been started in this workspace";
+// The stub Claude's default answer to a turn (Orca's structured-claude stub).
 const STUB_REPLY = "Ready when you are.";
+// Orca's single-session composer (its accessible name).
+const COMPOSER_LABEL = "Send a message…";
 const LIVE = "● Live chat";
 // The pane's liveness check runs every 15 s; past this, a session the check can't see is gone.
 const ONE_LIVENESS_CYCLE_MS = 21_000;
@@ -55,9 +57,13 @@ function record(finding: string, data: unknown): void {
 	console.log(`[combined-e2e] ${finding}: ${JSON.stringify(data)}`);
 }
 
+// Evidence only, never an assertion: an element in Orca's hidden window can fail to settle for a
+// screenshot, so a failed capture is recorded and the test goes on.
 async function shoot(target: Page | Locator, name: string): Promise<void> {
 	if (!SCREENSHOT_DIR) return;
-	await target.screenshot({ path: path.join(SCREENSHOT_DIR, `combined-${name}.png`) });
+	await target
+		.screenshot({ path: path.join(SCREENSHOT_DIR, `combined-${name}.png`), timeout: 15_000 })
+		.catch((err: unknown) => record(`screenshot ${name} skipped`, err instanceof Error ? err.message.split("\n")[0] : String(err)));
 }
 
 // Orca's window stays hidden (as in Orca's own e2e runs), where a page screenshot never settles;
@@ -119,18 +125,16 @@ async function readWebview(obsidian: Page, screenshotName?: string): Promise<{ t
 	return { text, url };
 }
 
+// Waits for the embedded chat page to be usable: its composer is there and editable. A just-created
+// chat has no turns (Orca no longer seeds one), so there is no transcript to wait for.
 async function expectWebviewShowsChat(obsidian: Page, screenshotName: string): Promise<string> {
-	let text = "";
 	await expect
-		.poll(
-			async () => {
-				text = (await readWebview(obsidian)).text;
-				return text.includes(SEED_TEXT) && text.includes(STUB_REPLY);
-			},
-			{ timeout: 30_000, message: "the embedded chat shows the seed turn and Claude's reply" },
-		)
+		.poll(() => inGuest<boolean>(obsidian, composerScript("return Boolean(el && !el.disabled && !el.readOnly);")), {
+			timeout: 30_000,
+			message: "the embedded chat shows its composer",
+		})
 		.toBe(true);
-	const { url } = await readWebview(obsidian, screenshotName);
+	const { text, url } = await readWebview(obsidian, screenshotName);
 	expect(new URL(url).pathname).toBe("/single-session-index.html");
 	// The guest lays out at the size of the <webview> box it is shown in.
 	const geometry = await obsidian.evaluate(async () => {
@@ -142,6 +146,59 @@ async function expectWebviewShowsChat(obsidian: Page, screenshotName: string): P
 	record(`webview geometry (${screenshotName})`, geometry);
 	expect(Math.abs(geometry.guest[0] - geometry.box[0])).toBeLessThanOrEqual(1);
 	return text;
+}
+
+// Guest code with `el` bound to the composer (by its accessible name), or null.
+function composerScript(body: string): string {
+	const label = JSON.stringify(COMPOSER_LABEL);
+	return `(() => {
+		const el = Array.from(document.querySelectorAll("textarea, [contenteditable=true], input"))
+			.find((e) => e.getAttribute("aria-label") === ${label} || e.getAttribute("placeholder") === ${label}) || null;
+		${body}
+	})()`;
+}
+
+// Types `text` into the embedded chat's composer and presses Enter, as a user would: the composer is
+// focused, then real key events go to the guest through the <webview>'s sendInputEvent (host-page
+// keyboard events don't reach the guest's focused element).
+async function sendFromEmbed(obsidian: Page, text: string): Promise<void> {
+	expect(await inGuest<boolean>(obsidian, composerScript("if (!el) return false; el.focus(); return document.activeElement === el;"))).toBe(true);
+	await obsidian.evaluate(async (chars) => {
+		const webview = document.querySelector("webview.orca-chat-webview") as HTMLElement & {
+			focus: () => void;
+			sendInputEvent: (event: { type: string; keyCode: string }) => void;
+		};
+		webview.focus();
+		for (const ch of chars) webview.sendInputEvent({ type: "char", keyCode: ch });
+	}, [...text]);
+	await expect
+		.poll(() => inGuest<string>(obsidian, composerScript("return el ? (el.value ?? el.textContent ?? '') : '';")), {
+			message: "the composer holds the typed text",
+		})
+		.toBe(text);
+	await obsidian.evaluate(() => {
+		const webview = document.querySelector("webview.orca-chat-webview") as HTMLElement & {
+			sendInputEvent: (event: { type: string; keyCode: string }) => void;
+		};
+		webview.sendInputEvent({ type: "keyDown", keyCode: "Return" });
+		webview.sendInputEvent({ type: "char", keyCode: "\r" });
+		webview.sendInputEvent({ type: "keyUp", keyCode: "Return" });
+	});
+}
+
+// The session's user turns, as Orca's journal records them (read with the plugin's own client).
+async function userTurns(orca: RealOrca, sessionId: string): Promise<string[]> {
+	const client = new OrcaRemoteClient();
+	await client.connect(orca.credential);
+	try {
+		const history = await client.readAgentSessionHistory(sessionId);
+		return history.page.items
+			.map((item) => item.body)
+			.filter((body): body is Extract<typeof body, { kind: "message" }> => body.kind === "message" && body.role === "user")
+			.map((body) => body.blocks.map((b) => ("text" in b ? String(b.text) : "")).join(""));
+	} finally {
+		client.disconnect();
+	}
 }
 
 type Repo = { id: string; path: string; kind?: string; displayName?: string };
@@ -197,6 +254,9 @@ test("New session in a real Obsidian creates a session a real Orca shows", async
 	const firstText = await expectWebviewShowsChat(obsidian, "obsidian-webview-session1");
 	record("webview text (session 1)", firstText.slice(0, 400));
 	await shoot(obsidian, "obsidian-session1");
+	// Nothing was sent on the user's behalf: the new chat has no user turn yet.
+	expect(await userTurns(realOrca, sid1!), "no turn before the user writes one").toEqual([]);
+	expect(firstText).not.toContain(STUB_REPLY);
 
 	// Orca's side of the same session.
 	const repos = (await orcaResult<{ repos: Repo[] }>(realOrca, "repo.list")).repos;
@@ -210,7 +270,6 @@ test("New session in a real Obsidian creates a session a real Orca shows", async
 	const dashboard = await openDashboard(realOrca);
 	await expect(dashboard.getByText("Claude Chat").first()).toBeVisible({ timeout: 30_000 });
 	await expect(dashboard.getByText(vaultName, { exact: true }).first()).toBeVisible();
-	await expect(dashboard.getByText(/just been started in this workspace/).first()).toBeVisible();
 	const cardTitles = dashboard.getByText("Claude Chat", { exact: true });
 	await expect(cardTitles).toHaveCount(1);
 	record("dashboard text (1 session)", (await dashboard.innerText()).slice(0, 600));
@@ -298,6 +357,14 @@ test("New session in a real Obsidian creates a session a real Orca shows", async
 	await expect(chatWebview(obsidian)).toHaveAttribute("data-orca-session-id", sid1!);
 	expect(await storedSessionId(obsidian)).toBe(sid1);
 	expect((await noticesSeen(obsidian)).filter((n) => /session ended/.test(n))).toEqual([]);
+	// ...with still no turn in it: a chat with no turns is listed and kept, not just a seeded one.
+	expect(await userTurns(realOrca, sid1!)).toEqual([]);
+
+	// The user's first message, typed into the embed, is the chat's first turn.
+	await sendFromEmbed(obsidian, "hello from Obsidian");
+	await expect.poll(async () => (await readWebview(obsidian)).text, { timeout: 30_000 }).toContain(STUB_REPLY);
+	await expect.poll(() => userTurns(realOrca, sid1!), { timeout: 30_000 }).toEqual(["hello from Obsidian"]);
+	await readWebview(obsidian, "obsidian-webview-session1-first-turn");
 
 	// ── (2) Second New session: the vault is registered now, so no prompt.
 	await newSessionButton(obsidian).click();
@@ -472,7 +539,7 @@ test.describe("no `claude` on Orca's PATH", () => {
 });
 
 // Orca's renderer leaves [[wikilinks]] as plain text (and strips obsidian:// hrefs); the pane links
-// them in the real transcript. The stub Claude answers every turn with wikilinks.
+// them in the real transcript. The stub Claude answers every turn (CLAUDE_STUB_REPLY) with wikilinks.
 test.describe("wikilinks in a real Orca transcript", () => {
 	const WIKILINK_REPLY = "See [[Welcome]] and [[Missing note]].";
 	test.use({ orcaStubReply: WIKILINK_REPLY });
@@ -497,18 +564,24 @@ test.describe("wikilinks in a real Orca transcript", () => {
 		await clickNewSessionAndAddVault(obsidian, vaultPath);
 		await expect(statusLabel(obsidian)).toHaveText(LIVE, { timeout: 30_000 });
 		const sessionId = await mountedSessionId(obsidian);
-		// The seed turn's reply.
+		await expectWebviewShowsChat(obsidian, "obsidian-webview-wikilinks-empty");
+		// A new chat has no turns, so nothing to link yet.
+		expect(await transcriptLinks(obsidian)).toEqual([]);
+
+		// The user writes in the embed; the stub Claude's reply carries the wikilinks.
+		await sendFromEmbed(obsidian, "Where are my notes?");
 		const expectedPair = [
 			{ link: "Welcome", text: "Welcome", dead: false, inComposer: false },
 			{ link: "Missing note", text: "Missing note", dead: true, inComposer: false },
 		];
 		await expect.poll(() => transcriptLinks(obsidian), { timeout: 30_000 }).toEqual(expectedPair);
 		const { text } = await readWebview(obsidian);
-		record("transcript text (seed reply)", text.slice(0, 400));
+		record("transcript text (first reply)", text.slice(0, 400));
 		expect(text).toContain("See Welcome and Missing note.");
 		expect(text).not.toContain("[[Welcome]]");
 
-		// A message sent now (as Ask Orca about this does) gets a reply rendered after the script ran.
+		// A message sent through the plugin (as Ask Orca about this does) gets a reply rendered after
+		// the script ran, linked the same way.
 		const sent = await obsidian.evaluate(async () => {
 			const ws = (window as unknown as {
 				app: { workspace: { getLeavesOfType: (t: string) => { view: { sendToSelected: (text: string) => Promise<boolean> } }[] } };
