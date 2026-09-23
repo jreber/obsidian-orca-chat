@@ -94,3 +94,14 @@ test("onCreating: never called when listRepos fails", async () => {
 	await assert.rejects(createVaultSession({ ...args(client), onCreating: () => calls++ }), /offline/);
 	assert.equal(calls, 0);
 });
+
+test("a mobile-scope refusal is mapped to the re-pair hint; other failures keep their message", async () => {
+	const { newSessionFailureMessage, MOBILE_PAIRING_NOTICE } = await import("../src/new-session.ts");
+	assert.equal(
+		MOBILE_PAIRING_NOTICE,
+		"Orca Chat needs the \"This computer only\" pairing link — re-pair from Orca's settings.",
+	);
+	assert.equal(newSessionFailureMessage("Method 'repo.add' is not available to mobile clients"), MOBILE_PAIRING_NOTICE);
+	assert.equal(newSessionFailureMessage("Method 'worktree.list' is not available to mobile clients"), MOBILE_PAIRING_NOTICE);
+	assert.equal(newSessionFailureMessage("nope"), "nope");
+});

@@ -435,6 +435,25 @@ test("New session: a failure Notices, shows the warning status and stores nothin
 	assert.equal(view.getSelectedHandle(), null);
 });
 
+test("New session: a mobile-scope pairing refusal Notices the re-pair hint", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const { client } = fakeCreateClient({
+		listWorkspaces: async () => {
+			throw new OrcaRemoteError("Method 'worktree.list' is not available to mobile clients");
+		},
+	});
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.deepEqual(FakeNoticeLog, [
+		"Orca Chat needs the \"This computer only\" pairing link — re-pair from Orca's settings.",
+	]);
+	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "⚠ Session not created");
+});
+
 test("sendToSelected with no session tells the user to click New session", async () => {
 	const view = makeView();
 	await view.onOpen();

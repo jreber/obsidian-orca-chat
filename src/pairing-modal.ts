@@ -14,6 +14,11 @@ export class PairingModal extends Modal {
 		contentEl.createEl("h3", { text: "Pair with Orca" });
 		const input = contentEl.createEl("input", { type: "text", placeholder: "Paste Orca pairing URL…" });
 		input.style.width = "100%";
+		// A mobile-scope pairing can't add the vault or list its workspaces, so New session fails.
+		contentEl.createEl("div", {
+			text: "Use Orca's \"This computer only\" pairing link (not the mobile QR).",
+			cls: "setting-item-description",
+		});
 		input.focus();
 
 		const buttonRow = contentEl.createDiv();

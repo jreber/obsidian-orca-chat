@@ -2,7 +2,13 @@ import { shell } from "electron";
 import { ItemView, Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { confirmAddVaultProject } from "./add-project-modal";
 import { buildSingleSessionEmbedUrl } from "./embed-url";
-import { createVaultSession, NewSessionCancelled, NewSessionError, type NewSessionClient } from "./new-session";
+import {
+	createVaultSession,
+	NewSessionCancelled,
+	NewSessionError,
+	newSessionFailureMessage,
+	type NewSessionClient,
+} from "./new-session";
 import {
 	compareAndSaveLastSessionId,
 	loadLastSessionId,
@@ -301,7 +307,7 @@ export class OrcaChatView extends ItemView {
 			if (err instanceof NewSessionCancelled) {
 				this.statusLabel.setText(this.currentStatus());
 			} else {
-				this.reportError(err);
+				this.reportError(err, newSessionFailureMessage);
 				this.statusLabel.setText("⚠ Session not created");
 			}
 		} finally {
@@ -491,9 +497,9 @@ export class OrcaChatView extends ItemView {
 		return this.storedSessionOverride;
 	}
 
-	private reportError(err: unknown): void {
+	private reportError(err: unknown, describe: (message: string) => string = (message) => message): void {
 		if (err instanceof OrcaRemoteError || err instanceof OrcaPairingError || err instanceof NewSessionError) {
-			new Notice(err.message);
+			new Notice(describe(err.message));
 		} else {
 			new Notice("Orca Chat: unexpected error, see console");
 			console.error(err);

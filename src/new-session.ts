@@ -21,6 +21,15 @@ export class NewSessionError extends Error {
 	}
 }
 
+// Orca refuses repo.add / worktree.list to a mobile-scope pairing (its mobile QR) with "Method
+// '<name>' is not available to mobile clients". New session needs the runtime-scope pairing link.
+export const MOBILE_PAIRING_NOTICE = "Orca Chat needs the \"This computer only\" pairing link — re-pair from Orca's settings.";
+
+// The Notice text for a failed New session: Orca's own message, except where there is a fix to name.
+export function newSessionFailureMessage(message: string): string {
+	return message.includes("not available to mobile clients") ? MOBILE_PAIRING_NOTICE : message;
+}
+
 export async function createVaultSession(args: {
 	client: NewSessionClient;
 	vaultPath: string;
