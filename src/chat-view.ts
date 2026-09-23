@@ -83,7 +83,8 @@ export function interceptObsidianLinks(
 	vaultName: string,
 ): void {
 	webview.addEventListener("dom-ready", () => {
-		void webview.executeJavaScript?.(obsidianLinkInterceptorScript(OBSIDIAN_LINK_CONSOLE_MARKER));
+		// Rejects if the guest navigates or the webview goes away mid-injection; nothing to do then.
+		void webview.executeJavaScript?.(obsidianLinkInterceptorScript(OBSIDIAN_LINK_CONSOLE_MARKER))?.catch(() => {});
 	});
 	webview.addEventListener("console-message", ((event: Event) => {
 		const message = (event as unknown as { message?: unknown }).message;
@@ -169,6 +170,8 @@ export class OrcaChatView extends ItemView {
 	private statusLabel!: HTMLSpanElement;
 	private embedContainer!: HTMLDivElement;
 	private currentWebview: HTMLElement | null = null;
+	// Stops the mounted webview's wikilink re-checks on vault changes (see wikilinks.ts).
+	private stopWikilinkRechecks: (() => void) | null = null;
 	private currentSessionId: string | null = null;
 	// Load state of currentWebview, so a status can be derived from it (see currentStatus).
 	private embedLoadState: "loading" | "loaded" | "failed" = "loading";
@@ -536,7 +539,7 @@ export class OrcaChatView extends ItemView {
 		webview.addClass("orca-chat-webview");
 		interceptObsidianLinks(webview, this.plugin.app.vault.getName());
 		// [[wikilinks]] in the agent's replies (see wikilinks.ts): opened in the main area, never here.
-		interceptWikilinks(webview, this.plugin.app, this.leaf);
+		this.stopWikilinkRechecks = interceptWikilinks(webview, this.plugin.app, this.leaf);
 		watchEmbedLoad(webview, {
 			onLoaded: () => {
 				if (this.currentWebview !== webview) return;
@@ -569,6 +572,8 @@ export class OrcaChatView extends ItemView {
 	}
 
 	private teardownWebview(): void {
+		this.stopWikilinkRechecks?.();
+		this.stopWikilinkRechecks = null;
 		this.currentWebview?.remove();
 		this.currentWebview = null;
 		this.embedContainer?.empty();

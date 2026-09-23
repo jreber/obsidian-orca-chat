@@ -8,7 +8,7 @@ import { JSDOM } from "jsdom";
 const dom = new JSDOM("<!doctype html><html><body></body></html>");
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, HTMLElement: dom.window.HTMLElement, Event: dom.window.Event });
 
-const { FakeNoticeLog, WorkspaceLeaf } = await import("./fakes/obsidian.ts");
+const { Events, FakeNoticeLog, WorkspaceLeaf } = await import("./fakes/obsidian.ts");
 const {
 	WIKILINK_CHECK_MARKER,
 	WIKILINK_OPEN_MARKER,
@@ -86,12 +86,13 @@ function fakeApp(opts: { recent: unknown; resolves?: (p: string) => boolean }) {
 	const calls: Call[] = [];
 	const rootSplit = { root: true };
 	const app = {
-		metadataCache: {
+		vault: new Events(),
+		metadataCache: Object.assign(new Events(), {
 			getFirstLinkpathDest: (linkpath: string, source: string) => {
 				calls.push(["getFirstLinkpathDest", linkpath, source]);
 				return (opts.resolves ?? (() => true))(linkpath) ? { path: `${linkpath}.md` } : null;
 			},
-		},
+		}),
 		workspace: {
 			rootSplit,
 			getMostRecentLeaf: (root?: unknown) => {
@@ -190,4 +191,54 @@ test("interceptWikilinks opens a clicked link, and ignores anything malformed", 
 	say(open({ link: "Welcome" }));
 	await flush();
 	assert.deepEqual(calls.at(-1), ["openLinkText", "Welcome", "", false]);
+});
+
+test("a vault change re-checks the page's targets and sends only what changed, both ways", async () => {
+	const { webview, scripts, say } = fakeWebview();
+	const existing = new Set(["Welcome", "Gone"]);
+	const { app } = fakeApp({ recent: null, resolves: (p) => existing.has(p) });
+	const stop = interceptWikilinks(webview, app as never, leafOfType("orca-chat-view") as never);
+	say(check(["Welcome", "Gone", "Plan#Steps"]));
+	await flush();
+	assert.deepEqual(scripts, [wikilinkMarkScript(["Plan#Steps"])]);
+
+	// The agent creates Plan.md and deletes Gone.md.
+	existing.add("Plan");
+	existing.delete("Gone");
+	app.vault.trigger("create");
+	app.metadataCache.trigger("resolved");
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.deepEqual(scripts.slice(1), [wikilinkMarkScript(["Gone"], ["Plan#Steps"])], "one debounced update");
+
+	// Nothing changed since: nothing sent.
+	app.metadataCache.trigger("resolved");
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.equal(scripts.length, 2);
+
+	stop();
+	assert.equal(app.vault.listenerCount() + app.metadataCache.listenerCount(), 0, "stop() removes every listener");
+	existing.delete("Welcome");
+	app.vault.trigger("delete");
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.equal(scripts.length, 2);
+});
+
+test("a rejected injection is caught (the guest navigated or the webview went away)", async () => {
+	const { webview } = fakeWebview();
+	webview.executeJavaScript = () => Promise.reject(new Error("gone"));
+	const { app } = fakeApp({ recent: null, resolves: () => false });
+	let unhandled = 0;
+	const onUnhandled = () => void unhandled++;
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		interceptWikilinks(webview, app as never, leafOfType("orca-chat-view") as never);
+		webview.dispatchEvent(new Event("dom-ready"));
+		const event = new Event("console-message");
+		(event as unknown as { message: unknown }).message = check(["Nope"]);
+		webview.dispatchEvent(event);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		assert.equal(unhandled, 0);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
 });

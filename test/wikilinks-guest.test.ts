@@ -171,6 +171,13 @@ test("each distinct target is sent for checking once; dead ones are marked, now 
 	assert.deepEqual(checks(g), [["Welcome", "Nope"], ["Third"]]);
 	const later = anchors(g).find((a) => a.textContent === "later")!;
 	assert.ok(later.classList.contains("is-unresolved"), "a dead target seen again is marked at once");
+
+	// The note is created later, and Welcome deleted: the host re-sends both.
+	g.window.eval(wikilinkMarkScript(["Welcome"], ["Nope"]));
+	const nowDead = anchors(g).filter((a) => a.classList.contains("is-unresolved"));
+	assert.deepEqual([...new Set(nowDead.map(linkOf))], ["Welcome"]);
+	const revived = anchors(g).filter((a) => linkOf(a) === "Nope");
+	assert.ok(revived.every((a) => !a.hasAttribute("title")), "a revived link loses its tooltip");
 });
 
 test("a large batch of targets is sent in chunks of at most 200", () => {

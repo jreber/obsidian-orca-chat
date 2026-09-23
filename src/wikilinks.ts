@@ -126,12 +126,18 @@ function orcaWikilinksGuest(win: GuestWindow, openMarker: string, checkMarker: s
 		}
 	}
 
-	win.__orcaWikilinksMark = function (links: unknown): void {
-		if (!Array.isArray(links)) return;
-		for (const link of links) if (typeof link === "string") dead.add(link);
+	// `deadLinks` are missing from the vault; `liveLinks` exist (again): the host re-sends both when
+	// the vault changes, so a note created or deleted later updates the marks.
+	win.__orcaWikilinksMark = function (deadLinks: unknown, liveLinks?: unknown): void {
+		if (Array.isArray(deadLinks)) for (const link of deadLinks) if (typeof link === "string") dead.add(link);
+		if (Array.isArray(liveLinks)) for (const link of liveLinks) if (typeof link === "string") dead.delete(link);
 		const all = doc.querySelectorAll("a.orca-wikilink");
 		for (let i = 0; i < all.length; i++) {
 			if (dead.has(all[i].getAttribute("data-orca-link") || "")) markDead(all[i]);
+			else if (all[i].classList.contains("is-unresolved")) {
+				all[i].classList.remove("is-unresolved");
+				all[i].removeAttribute("title");
+			}
 		}
 	};
 
@@ -178,10 +184,11 @@ export function wikilinkGuestScript(): string {
 	return `(${orcaWikilinksGuest.toString()})(window, ${args.join(", ")});`;
 }
 
-// Tells the guest which of the targets it reported don't exist in the vault. The targets are
-// embedded as a JSON literal, so they can only ever be data.
-export function wikilinkMarkScript(unresolved: string[]): string {
-	return `window.__orcaWikilinksMark && window.__orcaWikilinksMark(${JSON.stringify(unresolved)});`;
+// Tells the guest which of the targets it reported don't exist in the vault (and, after a vault
+// change, which now do). The targets are embedded as JSON literals, so they can only ever be data.
+export function wikilinkMarkScript(unresolved: string[], resolved: string[] = []): string {
+	const args = resolved.length > 0 ? `${JSON.stringify(unresolved)}, ${JSON.stringify(resolved)}` : JSON.stringify(unresolved);
+	return `window.__orcaWikilinksMark && window.__orcaWikilinksMark(${args});`;
 }
 
 function isLinkText(value: unknown): value is string {
@@ -231,6 +238,11 @@ export function unresolvedLinks(links: string[], resolves: (linkpath: string) =>
 }
 
 type WikilinkApp = Pick<App, "metadataCache" | "workspace">;
+type WikilinkVaultApp = WikilinkApp & Pick<App, "vault">;
+
+// How many distinct targets per page the host remembers to re-check on vault changes.
+const MAX_TRACKED_TARGETS = 5_000;
+const RECHECK_DELAY_MS = 300;
 
 const isChatLeaf = (leaf: WorkspaceLeaf, chatLeaf: WorkspaceLeaf) =>
 	leaf === chatLeaf || (leaf.view as { getViewType?: () => string } | null)?.getViewType?.() === "orca-chat-view";
@@ -254,13 +266,21 @@ export async function openWikilink(app: WikilinkApp, chatLeaf: WorkspaceLeaf, li
 	}
 }
 
+// Returns a function that stops the vault-change re-checks; call it when the webview goes away.
 export function interceptWikilinks(
 	webview: HTMLElement & { executeJavaScript?: (code: string) => Promise<unknown> },
-	app: WikilinkApp,
+	app: WikilinkVaultApp,
 	chatLeaf: WorkspaceLeaf,
-): void {
+): () => void {
+	const run = (code: string) => void webview.executeJavaScript?.(code)?.catch(() => {});
+	const resolves = (linkpath: string) => Boolean(linkpath && app.metadataCache.getFirstLinkpathDest(linkpath, ""));
+	// Every target the guest reported, and whether it was missing when last checked.
+	const known = new Map<string, boolean>();
+
 	webview.addEventListener("dom-ready", () => {
-		void webview.executeJavaScript?.(wikilinkGuestScript());
+		// A (re)loaded page starts over and reports its targets again.
+		known.clear();
+		run(wikilinkGuestScript());
 	});
 	webview.addEventListener("console-message", ((event: Event) => {
 		const message = (event as unknown as { message?: unknown }).message;
@@ -271,7 +291,41 @@ export function interceptWikilinks(
 		}
 		const targets = parseWikilinkCheck(message);
 		if (!targets || targets.length === 0) return;
-		const unresolved = unresolvedLinks(targets, (linkpath) => Boolean(linkpath && app.metadataCache.getFirstLinkpathDest(linkpath, "")));
-		if (unresolved.length > 0) void webview.executeJavaScript?.(wikilinkMarkScript(unresolved))?.catch(() => {});
+		const unresolved = unresolvedLinks(targets, resolves);
+		for (const target of targets) {
+			if (known.size < MAX_TRACKED_TARGETS || known.has(target)) known.set(target, unresolved.includes(target));
+		}
+		if (unresolved.length > 0) run(wikilinkMarkScript(unresolved));
 	}) as EventListener);
+
+	// A note created, deleted or renamed later: re-check what the page showed, and send only changes.
+	let timer: number | null = null;
+	const recheck = () => {
+		timer = null;
+		const nowDead: string[] = [];
+		const nowLive: string[] = [];
+		for (const [target, wasDead] of known) {
+			const isDead = !resolves(linkpathOf(target));
+			if (isDead === wasDead) continue;
+			known.set(target, isDead);
+			(isDead ? nowDead : nowLive).push(target);
+		}
+		if (nowDead.length > 0 || nowLive.length > 0) run(wikilinkMarkScript(nowDead, nowLive));
+	};
+	const schedule = () => {
+		if (known.size === 0 || timer !== null) return;
+		timer = window.setTimeout(recheck, RECHECK_DELAY_MS);
+	};
+	const refs = [
+		app.metadataCache.on("resolved", schedule),
+		app.vault.on("create", schedule),
+		app.vault.on("delete", schedule),
+		app.vault.on("rename", schedule),
+	];
+	return () => {
+		if (timer !== null) window.clearTimeout(timer);
+		timer = null;
+		app.metadataCache.offref(refs[0]);
+		for (const ref of refs.slice(1)) app.vault.offref(ref);
+	};
 }

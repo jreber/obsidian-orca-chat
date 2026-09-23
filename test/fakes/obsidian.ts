@@ -97,9 +97,42 @@ export class FileSystemAdapter {
 	}
 }
 
+// Obsidian's Events: on() returns a ref that offref() removes; trigger() is how tests fire them.
+export class Events {
+	private handlers: { name: string; callback: (...args: unknown[]) => unknown }[] = [];
+	on(name: string, callback: (...args: unknown[]) => unknown): object {
+		const ref = { name, callback };
+		this.handlers.push(ref);
+		return ref;
+	}
+	offref(ref: object): void {
+		this.handlers = this.handlers.filter((h) => h !== ref);
+	}
+	trigger(name: string, ...args: unknown[]): void {
+		for (const h of [...this.handlers]) if (h.name === name) h.callback(...args);
+	}
+	listenerCount(): number {
+		return this.handlers.length;
+	}
+}
+
+class FakeVault extends Events {
+	adapter: unknown = {};
+	getName(): string {
+		return "Vault";
+	}
+}
+
+class FakeMetadataCache extends Events {
+	getFirstLinkpathDest(_linkpath: string, _source: string): unknown {
+		return null;
+	}
+}
+
 export class App {
 	workspace: Record<string, unknown> = {};
-	vault: { adapter: unknown; getName(): string } = { adapter: {}, getName: () => "Vault" };
+	vault = new FakeVault() as FakeVault & Record<string, unknown>;
+	metadataCache = new FakeMetadataCache();
 }
 
 export class TFile {

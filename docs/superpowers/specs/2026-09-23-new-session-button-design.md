@@ -126,7 +126,10 @@ It also doesn't parse `[[wikilinks]]`: they render as literal text `[[Note]]`.
   and an unclosed `[[Note` isn't linked until `]]` arrives.
 - The guest reports each distinct target once (`orca-chat:wikilink-check:`, at most 200 per
   message). The host resolves them with `metadataCache.getFirstLinkpathDest` and has the guest mark
-  the missing ones (faded, dotted underline, "Note not found in this vault").
+  the missing ones (faded, dotted underline, "Note not found in this vault"). When the vault changes
+  (a note created, deleted or renamed; `metadataCache` "resolved"), the host re-checks the targets
+  the page reported, debounced, and sends only the changes, so a note the agent creates later loses
+  its dead mark and a deleted one gains it.
 - A click reports `orca-chat:wikilink-open:{"link":…}`. The page is agent-influenced, so the host
   validates it strictly (JSON, a string of at most 512 characters, no control characters). It then
   opens the note only if it exists in the vault, in the most recent main-area leaf, or a new tab when

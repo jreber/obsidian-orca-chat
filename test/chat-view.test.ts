@@ -108,6 +108,22 @@ test("interceptObsidianLinks ignores console-message events without the marker p
 	}
 });
 
+test("interceptObsidianLinks catches a rejected injection", async () => {
+	const webview = makeFakeWebview();
+	webview.executeJavaScript = () => Promise.reject(new Error("guest navigated"));
+	let unhandled = 0;
+	const onUnhandled = () => void unhandled++;
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		interceptObsidianLinks(webview, "Vault");
+		webview.dispatchEvent(new Event("dom-ready"));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		assert.equal(unhandled, 0);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
+});
+
 test("interceptObsidianLinks passes on only obsidian://open links to this vault", () => {
 	const webview = makeFakeWebview();
 	const calls: string[] = [];
