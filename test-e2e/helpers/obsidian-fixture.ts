@@ -186,9 +186,23 @@ export const test = base.extend<Fixtures>({
 
 			browser = await chromium.connectOverCDP(wsEndpoint);
 			const page = await waitForFirstPage(browser);
-			await dismissFirstRunPrompts(page);
+			const trusted = await dismissFirstRunPrompts(page);
 			await page.waitForFunction(() => "app" in window);
+			// After "Trust author", Obsidian opens Settings in a second window, sometimes seconds later:
+			// wait for it (briefly) so it is closed here rather than in the middle of the test.
+			if (trusted) {
+				const secondWindow = async () => browser!.contexts().flatMap((ctx) => ctx.pages()).length > 1;
+				for (let waited = 0; waited < 8_000 && !(await secondWindow()); waited += 250) {
+					await new Promise((resolve) => setTimeout(resolve, 250));
+				}
+			}
 			await closeStrayWindows(browser, page);
+			// First-run Settings can also open later, after the check above; it then takes focus, and
+			// modals and Notices open in it instead. Close any Obsidian window that appears during the
+			// test. CDP lists the chat's <webview> guest as a page too; it has no `app` and is left alone.
+			for (const context of browser.contexts()) {
+				context.on("page", (stray) => void closeLateObsidianWindow(page, stray));
+			}
 			await page.evaluate(() => {
 				const win = window as unknown as { app: { commands: { executeCommandById: (id: string) => void } } };
 				win.app.commands.executeCommandById("orca-chat:open-orca-chat");
@@ -260,12 +274,15 @@ async function waitForFirstPage(browser: Browser): Promise<Page> {
 // Uses waitFor (polls/retries) rather than isVisible (a single immediate, non-waiting check) — the
 // modal renders asynchronously a beat after the renderer page itself is reachable over CDP, so a bare
 // isVisible() check here was observed to fire before the dialog existed and skip the click entirely.
-async function dismissFirstRunPrompts(page: Page): Promise<void> {
+// Resolves to whether it clicked "Trust author".
+async function dismissFirstRunPrompts(page: Page): Promise<boolean> {
 	const trustButton = page.getByRole("button", { name: /trust author/i });
 	await trustButton.waitFor({ state: "visible", timeout: 8000 }).catch(() => {});
 	if (await trustButton.isVisible().catch(() => false)) {
 		await trustButton.click();
+		return true;
 	}
+	return false;
 }
 
 // On a fresh --user-data-dir, Obsidian (seen on 1.13) can open its Settings in a second, focused
@@ -287,6 +304,18 @@ async function closeStrayWindows(browser: Browser, mainPage: Page): Promise<void
 			.then(() => true, () => false);
 		if (focused) return;
 		if (Date.now() > deadline) throw new Error("Obsidian's main window never took focus after closing stray windows");
+	}
+}
+
+async function closeLateObsidianWindow(mainPage: Page, stray: Page): Promise<void> {
+	if (stray === mainPage) return;
+	try {
+		await stray.waitForFunction(() => "app" in window || location.protocol.startsWith("http"), undefined, { timeout: 10_000 });
+		if (!(await stray.evaluate(() => "app" in window))) return;
+		await stray.close();
+		await mainPage.bringToFront();
+	} catch {
+		// Gone already, or not an Obsidian window.
 	}
 }
 
