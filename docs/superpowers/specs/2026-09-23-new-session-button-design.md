@@ -33,7 +33,11 @@ respect (tab in Orca, Agent Dashboard card, history), and the pane embeds it exa
 3. No match: show the confirmation modal. Confirm calls `repo.add {path, kind: 'folder', displayName:
    <vault name>}` (`kind` must be explicit; Orca defaults to `git`). Decline aborts with nothing created.
    `repo.add` is idempotent for an already-registered path.
-4. `worktree.list` for that project gives the folder workspace id.
+4. `worktree.list` for that project gives the folder workspace id: the workspace whose path is the
+   vault root, or else the project's only workspace when it sits at the project's own path. The chat
+   never runs outside the vault: with no such workspace (say, a git project whose other checkouts
+   don't match), New session refuses with a Notice naming the vault path and "⚠ Session not
+   created".
 5. `agentSession.create` with `worktree: 'id:<workspaceId>'`, `agent: 'claude'`, a fresh session id, and
    an envelope with `expectedRuntimeFence: null` and the create fingerprint
    (`{method:'agentSession.create', sessionId, fields:{worktree, agent, resumeFrom}}`), mirroring

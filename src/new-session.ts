@@ -45,10 +45,18 @@ export async function createVaultSession(args: {
 	args.onCreating?.();
 	const repo = found ?? (await client.addFolderRepo(vaultPath, args.vaultName));
 	const workspaces = await client.listWorkspaces(repo.id);
-	const wanted = normalizeVaultPath(vaultPath);
-	const workspace = workspaces.find((w) => normalizeVaultPath(w.path) === wanted) ?? workspaces[0];
-	if (!workspace) {
+	if (workspaces.length === 0) {
 		throw new NewSessionError("Orca has no workspace for this vault — open the project in Orca once, then try again.");
+	}
+	// The chat must run in the vault itself. Failing an exact match, a project's only workspace at the
+	// project's own path (the project matched the vault, or was just added for it) is the vault under
+	// another spelling; any other workspace (another checkout of a git project) is somewhere else.
+	const wanted = normalizeVaultPath(vaultPath);
+	const workspace =
+		workspaces.find((w) => normalizeVaultPath(w.path) === wanted) ??
+		(workspaces.length === 1 && normalizeVaultPath(workspaces[0].path) === normalizeVaultPath(repo.path) ? workspaces[0] : null);
+	if (!workspace) {
+		throw new NewSessionError(`None of the Orca project's workspaces is the vault folder (${vaultPath}), so no chat was created.`);
 	}
 	return client.createClaudeSession(workspace.id);
 }

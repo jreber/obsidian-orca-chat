@@ -55,13 +55,35 @@ test("prefers the workspace whose path is the vault root when several exist", as
 	assert.ok(log.includes("create root"));
 });
 
-test("falls back to the first workspace when none is at the vault root", async () => {
+test("several workspaces and none at the vault root: refuses with a clear error and creates nothing", async () => {
 	const log: string[] = [];
 	const client = fakeClient({
 		listWorkspaces: async () => [{ id: "first", path: "/elsewhere" }, { id: "second", path: "/other" }],
 	}, log);
+	await assert.rejects(
+		createVaultSession(args(client)),
+		(e: unknown) => e instanceof NewSessionError && (e as Error).message.includes("/v/") && /no chat was created/.test((e as Error).message),
+	);
+	assert.ok(!log.some((l) => l.startsWith("create")));
+});
+
+test("one workspace somewhere other than the project folder: refused, never used", async () => {
+	const log: string[] = [];
+	const client = fakeClient({ listWorkspaces: async () => [{ id: "only", path: "/elsewhere" }] }, log);
+	await assert.rejects(createVaultSession(args(client)), NewSessionError);
+	assert.ok(!log.some((l) => l.startsWith("create")));
+});
+
+test("the project's only workspace at the project's own path is used even if spelled differently from the vault", async () => {
+	const log: string[] = [];
+	// Orca reports the path it stored for the added project (say, resolved), not the one sent.
+	const client = fakeClient({
+		listRepos: async () => (log.push("listRepos"), []),
+		addFolderRepo: async () => (log.push("add"), { id: "r2", path: "/private/v", kind: "folder" as const }),
+		listWorkspaces: async () => [{ id: "only", path: "/private/v/" }],
+	}, log);
 	await createVaultSession(args(client));
-	assert.deepEqual(log, ["listRepos", "create first"]);
+	assert.ok(log.includes("create only"));
 });
 
 test("addFolderRepo failure propagates unchanged and nothing is listed or created", async () => {
