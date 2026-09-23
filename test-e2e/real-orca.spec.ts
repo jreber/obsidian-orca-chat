@@ -13,6 +13,7 @@ import { chatWebview, newSessionButton, reopenPane, SCREENSHOT_DIR, statusLabel,
 import { enableStructuredChatDashboard, launchRealOrca, ORCA_DIR, type RealOrca } from "./helpers/real-orca";
 import { OrcaRemoteClient } from "../src/orca-remote-client";
 import { decodePairingUrl } from "../src/orca-pairing";
+import { MOBILE_PAIRING_NOTICE, newSessionFailureMessage } from "../src/new-session";
 import { sendRemoteRuntimeRequest } from "../src/orca-remote/remote-runtime-client";
 import {
 	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
@@ -24,6 +25,8 @@ const E2E_ROOT = path.join(homedir(), ".cache", "orca-chat-e2e");
 const SEED_TEXT = "You've just been started in this workspace";
 const STUB_REPLY = "Ready when you are.";
 const LIVE = "● Live chat";
+// The pane's liveness check runs every 15 s; past this, a session the check can't see is gone.
+const ONE_LIVENESS_CYCLE_MS = 21_000;
 
 const test = base.extend<{ realOrca: RealOrca; orcaClaudeOnPath: "stub-first" | "no-claude" }>({
 	orcaClaudeOnPath: ["stub-first", { option: true }],
@@ -183,6 +186,7 @@ test("New session in a real Obsidian creates a session a real Orca shows", async
 	// ── (1) First New session: the fresh Orca does not know the vault, so the plugin asks first.
 	await clickNewSessionAndAddVault(obsidian, vaultPath);
 	await expect(statusLabel(obsidian)).toHaveText(LIVE, { timeout: 30_000 });
+	const liveAt = Date.now();
 	const sid1 = await mountedSessionId(obsidian);
 	expect(sid1).toMatch(/^[0-9a-f-]{36}$/);
 	expect(await storedSessionId(obsidian)).toBe(sid1);
@@ -228,8 +232,8 @@ test("New session in a real Obsidian creates a session a real Orca shows", async
 	expect(readded.id).toBe(vaultRepo.id);
 	// What the pane's reattach and 15 s liveness check rely on: the plugin's own client must see
 	// the session it created. Orca hides Claude chat tabs from paired clients that do not advertise
-	// agent-session.structured.claude.v1, so this fails until the plugin's client sends it.
-	expect.soft(pluginTabs.map((t) => t.sessionId), "the plugin's client sees its session in session.tabs.listAll").toContain(sid1);
+	// agent-session.structured.claude.v1, so this needs the plugin's client to send it.
+	expect(pluginTabs.map((t) => t.sessionId), "the plugin's client sees its session in session.tabs.listAll").toContain(sid1);
 	expect(workspaces).toContainEqual(expect.objectContaining({ path: vaultPath }));
 	client.disconnect();
 	// session.tabs.listAll as a paired client sees it, with and without Claude-structured support
@@ -270,9 +274,27 @@ test("New session in a real Obsidian creates a session a real Orca shows", async
 		);
 		record("mobile-scope client calls", results);
 		mobile.disconnect();
+		// The refusal a mobile-scope pairing gets is the one the plugin maps to its re-pair hint.
+		const refusal = String(results["repo.add"]).replace(/^refused: /, "");
+		expect(newSessionFailureMessage(refusal)).toBe(MOBILE_PAIRING_NOTICE);
 	} else {
 		record("mobile-scope client calls", { skipped: mobileOffer });
 	}
+
+	// The regression this spec found: the first liveness check tore the new chat down ("session
+	// ended") because Orca's listAll hid it from the plugin. After a full cycle it must still be live.
+	const waitMs = ONE_LIVENESS_CYCLE_MS - (Date.now() - liveAt);
+	if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+	record("session 1 after one liveness cycle", {
+		sinceLiveMs: Date.now() - liveAt,
+		status: await statusLabel(obsidian).textContent(),
+		notices: await noticesSeen(obsidian),
+	});
+	expect(Date.now() - liveAt).toBeGreaterThan(20_000);
+	await expect(statusLabel(obsidian)).toHaveText(LIVE);
+	await expect(chatWebview(obsidian)).toHaveAttribute("data-orca-session-id", sid1!);
+	expect(await storedSessionId(obsidian)).toBe(sid1);
+	expect((await noticesSeen(obsidian)).filter((n) => /session ended/.test(n))).toEqual([]);
 
 	// ── (2) Second New session: the vault is registered now, so no prompt.
 	await newSessionButton(obsidian).click();
