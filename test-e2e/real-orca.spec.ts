@@ -4,11 +4,12 @@
 //
 // Needs ORCA_E2E_ORCA_DIR=<Orca checkout with an `electron-vite build --mode e2e` + web client
 // build>; skipped otherwise. Screenshots go to ORCA_CHAT_E2E_SCREENSHOT_DIR as combined-*.png.
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import { test as base, expect } from "./helpers/obsidian-fixture";
+import { activateChatLeaf, captureGuest, inGuest, leaves } from "./helpers/guest";
 import { chatWebview, newSessionButton, reopenPane, SCREENSHOT_DIR, statusLabel, storedSessionId } from "./helpers/pane";
 import { enableStructuredChatDashboard, launchRealOrca, ORCA_DIR, REAL_ORCA_UNSUPPORTED_REASON, type RealOrca } from "./helpers/real-orca";
 import { OrcaRemoteClient } from "../src/orca-remote-client";
@@ -28,10 +29,11 @@ const LIVE = "● Live chat";
 // The pane's liveness check runs every 15 s; past this, a session the check can't see is gone.
 const ONE_LIVENESS_CYCLE_MS = 21_000;
 
-const test = base.extend<{ realOrca: RealOrca; orcaClaudeOnPath: "stub-first" | "no-claude" }>({
+const test = base.extend<{ realOrca: RealOrca; orcaClaudeOnPath: "stub-first" | "no-claude"; orcaStubReply: string | undefined }>({
 	orcaClaudeOnPath: ["stub-first", { option: true }],
-	realOrca: async ({ orcaClaudeOnPath }, use) => {
-		const orca = await launchRealOrca({ root: E2E_ROOT, claudeOnPath: orcaClaudeOnPath });
+	orcaStubReply: [undefined, { option: true }],
+	realOrca: async ({ orcaClaudeOnPath, orcaStubReply }, use) => {
+		const orca = await launchRealOrca({ root: E2E_ROOT, claudeOnPath: orcaClaudeOnPath, stubReply: orcaStubReply });
 		try {
 			await enableStructuredChatDashboard(orca.page);
 			await use(orca);
@@ -466,5 +468,78 @@ test.describe("no `claude` on Orca's PATH", () => {
 		const dashboard = await openDashboard(realOrca);
 		await expect(dashboard.getByText("Claude Chat", { exact: true }).first()).toBeVisible();
 		await shoot(dashboard, "orca-dashboard-override");
+	});
+});
+
+// Orca's renderer leaves [[wikilinks]] as plain text (and strips obsidian:// hrefs); the pane links
+// them in the real transcript. The stub Claude answers every turn with wikilinks.
+test.describe("wikilinks in a real Orca transcript", () => {
+	const WIKILINK_REPLY = "See [[Welcome]] and [[Missing note]].";
+	test.use({ orcaStubReply: WIKILINK_REPLY });
+
+	type TranscriptLink = { link: string; text: string; dead: boolean; inComposer: boolean };
+	const transcriptLinks = (obsidian: Page) =>
+		inGuest<TranscriptLink[]>(
+			obsidian,
+			`Array.from(document.querySelectorAll("a.orca-wikilink")).map((a) => ({
+				link: a.getAttribute("data-orca-link"),
+				text: a.textContent,
+				dead: a.classList.contains("is-unresolved"),
+				inComposer: Boolean(a.closest("textarea, [contenteditable], form")),
+			}))`,
+		);
+
+	test("the agent's [[wikilinks]] are links; a live one opens the note beside the chat", async ({ realOrca, obsidian, vaultDir, vaultPath }) => {
+		test.setTimeout(180_000);
+		await recordNotices(obsidian);
+		expect(existsSync(path.join(vaultDir, "Welcome.md")), "the fixture vault has Welcome.md").toBe(true);
+
+		await clickNewSessionAndAddVault(obsidian, vaultPath);
+		await expect(statusLabel(obsidian)).toHaveText(LIVE, { timeout: 30_000 });
+		const sessionId = await mountedSessionId(obsidian);
+		// The seed turn's reply.
+		const expectedPair = [
+			{ link: "Welcome", text: "Welcome", dead: false, inComposer: false },
+			{ link: "Missing note", text: "Missing note", dead: true, inComposer: false },
+		];
+		await expect.poll(() => transcriptLinks(obsidian), { timeout: 30_000 }).toEqual(expectedPair);
+		const { text } = await readWebview(obsidian);
+		record("transcript text (seed reply)", text.slice(0, 400));
+		expect(text).toContain("See Welcome and Missing note.");
+		expect(text).not.toContain("[[Welcome]]");
+
+		// A message sent now (as Ask Orca about this does) gets a reply rendered after the script ran.
+		const sent = await obsidian.evaluate(async () => {
+			const ws = (window as unknown as {
+				app: { workspace: { getLeavesOfType: (t: string) => { view: { sendToSelected: (text: string) => Promise<boolean> } }[] } };
+			}).app.workspace;
+			return ws.getLeavesOfType("orca-chat-view")[0].view.sendToSelected("Where do I start?");
+		});
+		expect(sent).toBe(true);
+		await expect.poll(() => transcriptLinks(obsidian), { timeout: 30_000 }).toEqual([...expectedPair, ...expectedPair]);
+		await captureGuest(obsidian, "combined-wikilinks-guest");
+		record("wikilinks in transcript", await transcriptLinks(obsidian));
+
+		// ── Click [[Welcome]] with the chat's leaf active, as a real click in the webview leaves it.
+		await activateChatLeaf(obsidian);
+		await inGuest(obsidian, `document.querySelector("a.orca-wikilink:not(.is-unresolved)").click()`);
+		await expect
+			.poll(async () => (await leaves(obsidian)).filter((l) => l.type === "markdown" && l.file === "Welcome.md"), { timeout: 15_000 })
+			.toEqual([{ type: "markdown", file: "Welcome.md", inMain: true, active: true }]);
+		expect((await leaves(obsidian)).filter((l) => l.type === "orca-chat-view")).toEqual([
+			{ type: "orca-chat-view", file: null, inMain: false, active: false },
+		]);
+		await expect(chatWebview(obsidian)).toHaveAttribute("data-orca-session-id", sessionId!);
+		await expect(statusLabel(obsidian)).toHaveText(LIVE);
+		expect((await readWebview(obsidian)).text).toContain("See Welcome and Missing note.");
+		await shoot(obsidian, "obsidian-wikilink-opened");
+
+		// ── Click [[Missing note]]: a Notice, and no note is created.
+		await activateChatLeaf(obsidian);
+		await inGuest(obsidian, `document.querySelector("a.orca-wikilink.is-unresolved").click()`);
+		await expect.poll(() => noticesSeen(obsidian)).toContain('Orca Chat: no note named "Missing note" in this vault');
+		expect(existsSync(path.join(vaultDir, "Missing note.md"))).toBe(false);
+		await expect(chatWebview(obsidian)).toHaveAttribute("data-orca-session-id", sessionId!);
+		record("notices", await noticesSeen(obsidian));
 	});
 });

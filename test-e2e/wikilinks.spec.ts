@@ -1,11 +1,11 @@
 // [[wikilinks]] in the embedded chat: the fake Orca serves a page with wikilinks as plain text (as
 // Orca's renderer leaves them); the pane's injected script links them, the host marks dead ones, and
 // a click opens the note in the main area while the chat stays mounted.
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
-import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/obsidian-fixture";
-import { chatWebview, SCREENSHOT_DIR, screenshotWindow, startNewSession, statusLabel } from "./helpers/pane";
+import { activateChatLeaf, captureGuest, guestAnchors, inGuest, leaves } from "./helpers/guest";
+import { chatWebview, screenshotWindow, startNewSession, statusLabel } from "./helpers/pane";
 
 const EMBED_PAGE = {
 	html: `<!doctype html><title>Orca Session</title>
@@ -24,72 +24,6 @@ setTimeout(function () {
 </script>
 </body>`,
 };
-
-type Anchor = { parent: string; link: string; text: string; dead: boolean; title: string | null };
-
-// Runs `code` inside the guest page.
-function inGuest<T>(obsidian: Page, code: string): Promise<T> {
-	return obsidian.evaluate(async (js) => {
-		const webview = document.querySelector("webview.orca-chat-webview") as HTMLElement & {
-			executeJavaScript: (code: string) => Promise<unknown>;
-		};
-		return webview.executeJavaScript(js);
-	}, code) as Promise<T>;
-}
-
-const guestAnchors = (obsidian: Page) =>
-	inGuest<Anchor[]>(
-		obsidian,
-		`Array.from(document.querySelectorAll("a.orca-wikilink")).map((a) => ({
-			parent: a.parentElement.id,
-			link: a.getAttribute("data-orca-link"),
-			text: a.textContent,
-			dead: a.classList.contains("is-unresolved"),
-			title: a.getAttribute("title"),
-		}))`,
-	);
-
-async function captureGuest(obsidian: Page, name: string): Promise<void> {
-	if (!SCREENSHOT_DIR) return;
-	const png = await obsidian.evaluate(async () => {
-		const webview = document.querySelector("webview.orca-chat-webview") as HTMLElement & {
-			capturePage: () => Promise<{ toDataURL: () => string }>;
-		};
-		return (await webview.capturePage()).toDataURL();
-	});
-	writeFileSync(path.join(SCREENSHOT_DIR, `plugin-e2e-${name}.png`), Buffer.from(png.split(",")[1], "base64"));
-}
-
-type LeafInfo = { type: string; file: string | null; inMain: boolean; active: boolean };
-
-// Every leaf: its view type, open file, whether it is in the main editor area, and whether active.
-const leaves = (obsidian: Page) =>
-	obsidian.evaluate(() => {
-		type Leaf = { view: { getViewType: () => string; file?: { path: string } | null }; getRoot: () => unknown };
-		const ws = (window as unknown as {
-			app: { workspace: { rootSplit: unknown; activeLeaf: Leaf | null; iterateAllLeaves: (cb: (leaf: Leaf) => void) => void } };
-		}).app.workspace;
-		const out: LeafInfo[] = [];
-		// A truthy return would stop the iteration: keep the callback's body a statement.
-		ws.iterateAllLeaves((leaf) => {
-			out.push({
-				type: leaf.view.getViewType(),
-				file: leaf.view.file?.path ?? null,
-				inMain: leaf.getRoot() === ws.rootSplit,
-				active: leaf === ws.activeLeaf,
-			});
-		});
-		return out;
-	});
-
-// A click inside the webview makes the chat's leaf the active one; do the same before clicking.
-const activateChatLeaf = (obsidian: Page) =>
-	obsidian.evaluate(() => {
-		const ws = (window as unknown as {
-			app: { workspace: { getLeavesOfType: (t: string) => unknown[]; setActiveLeaf: (l: unknown, p: unknown) => void } };
-		}).app.workspace;
-		ws.setActiveLeaf(ws.getLeavesOfType("orca-chat-view")[0], { focus: true });
-	});
 
 test("wikilinks in the chat are clickable, dead ones marked, and open notes in the main area", async ({
 	server,
@@ -113,7 +47,7 @@ test("wikilinks in the chat are clickable, dead ones marked, and open notes in t
 		]);
 	expect(await inGuest(obsidian, `document.getElementById("c").textContent`)).toBe("[[Welcome]]");
 	expect(await inGuest(obsidian, `document.getElementById("p1").textContent`)).toBe("See Welcome and Nope.");
-	await captureGuest(obsidian, "wikilinks-guest");
+	await captureGuest(obsidian, "plugin-e2e-wikilinks-guest");
 
 	const welcomeEditors = async () => (await leaves(obsidian)).filter((l) => l.type === "markdown" && l.file === "Welcome.md");
 	expect(await welcomeEditors()).toEqual([]);

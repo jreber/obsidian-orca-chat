@@ -58,6 +58,8 @@ export type LaunchRealOrcaOptions = {
 	 * only `agentCmdOverrides.claude` can reach it.
 	 */
 	claudeOnPath: "stub-first" | "no-claude";
+	/** What the stub Claude answers every turn with (its CLAUDE_STUB_REPLY); unset keeps its default. */
+	stubReply?: string;
 };
 
 function requireOrcaDir(): string {
@@ -192,6 +194,8 @@ export async function launchRealOrca(options: LaunchRealOrcaOptions): Promise<Re
 		CLAUDE_STUB_LOG: stubLog,
 		PATH: launchPath(options.claudeOnPath, stubDir),
 	});
+	delete env.CLAUDE_STUB_REPLY;
+	if (options.stubReply !== undefined) env.CLAUDE_STUB_REPLY = options.stubReply;
 	const args = ["--no-sandbox", "--disable-gpu", "--disable-gpu-compositing", "--disable-gpu-sandbox", "--disable-dev-shm-usage", "--in-process-gpu", orcaDir];
 
 	let app!: ElectronApplication;
