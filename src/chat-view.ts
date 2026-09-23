@@ -1,7 +1,7 @@
 import { shell } from "electron";
 import { ItemView, Notice, Plugin, type Workspace, WorkspaceLeaf } from "obsidian";
 import { confirmAddVaultProject } from "./add-project-modal";
-import { appendAgentsAdvice } from "./agents-guidance";
+import { appendAgentsAdvice } from "./agents-advice";
 import { buildSingleSessionEmbedUrl } from "./embed-url";
 import {
 	createVaultSession,
@@ -417,7 +417,7 @@ export class OrcaChatView extends ItemView {
 	}
 
 	// Writes the plugin's advice for the chat's agent into AGENTS.md at the vault root (the session's
-	// working folder); see agents-guidance.ts.
+	// working folder); see agents-advice.ts.
 	private async onAppendAgentsAdvice(): Promise<void> {
 		const app = this.plugin.app;
 		if (!getVaultRootPath(app)) {

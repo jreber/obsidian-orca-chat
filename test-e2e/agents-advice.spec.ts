@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/obsidian-fixture";
 import { expectStatusFits, newSessionButton, screenshotPane, statusLabel } from "./helpers/pane";
-import { adviceBlock, ADVICE_START } from "../src/agents-guidance";
+import { adviceBlock, ADVICE_START } from "../src/agents-advice";
 
 const adviceButton = (obsidian: Page) => obsidian.locator(".orca-chat-agents-advice");
 

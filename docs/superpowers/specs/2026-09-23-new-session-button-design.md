@@ -148,7 +148,7 @@ creates the file if it is missing, appends the block at the end after a blank li
 existing block in place (never a second copy). It never changes text outside the markers and keeps the
 file's line endings. A start marker without an end marker is refused. Notices: "Added Orca Chat
 advice to AGENTS.md" or "Updated Orca Chat advice in AGENTS.md". See
-[docs/vault-agents-guidance.md](../../vault-agents-guidance.md). There is no command-palette entry.
+[docs/vault-agents-advice.md](../../vault-agents-advice.md). There is no command-palette entry.
 
 ## Versioning
 
@@ -187,5 +187,5 @@ files have uncommitted changes, `unknown` without git), and `versionLabel()`
 5. Expect: "Connecting…" then "● Live chat"; the chat visible in the pane; the vault as a project and a
    "Claude Chat" card on Orca's Agent Dashboard. Reopening the pane reattaches to the same chat.
 6. Optional: click **Append AGENTS.md advice** in the pane so new chats link notes as clickable
-   `[[wikilinks]]` (see [docs/vault-agents-guidance.md](../../vault-agents-guidance.md)). The Pair with
+   `[[wikilinks]]` (see [docs/vault-agents-advice.md](../../vault-agents-advice.md)). The Pair with
    Orca dialog's footer shows the installed version and build (`Orca Chat v0.2.0 (<hash>)`).

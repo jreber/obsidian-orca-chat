@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const { applyAdvice, adviceBlock, appendAgentsAdvice, ADVICE_START, ADVICE_END, ADDED_NOTICE, UPDATED_NOTICE } = await import(
-	"../src/agents-guidance.ts"
+	"../src/agents-advice.ts"
 );
 
 const BLOCK = adviceBlock("\n");
