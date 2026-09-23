@@ -1,5 +1,5 @@
 import { shell } from "electron";
-import { ItemView, Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, Plugin, type Workspace, WorkspaceLeaf } from "obsidian";
 import { confirmAddVaultProject } from "./add-project-modal";
 import { buildSingleSessionEmbedUrl } from "./embed-url";
 import {
@@ -110,7 +110,19 @@ export function watchEmbedLoad(
 	});
 }
 
-// Status texts stay short: the label ellipsizes past ~25 characters at the default sidebar width.
+// After a (re-)pair: has every open Orca Chat pane re-read the pairing. Every pane is tried even if
+// one fails; then rejects with the first failure so the caller can say the refresh didn't complete.
+export async function reloadChatViewCredentials(workspace: Pick<Workspace, "getLeavesOfType">): Promise<void> {
+	const views = workspace
+		.getLeavesOfType(ORCA_CHAT_VIEW_TYPE)
+		.map((leaf) => leaf.view)
+		.filter((view): view is OrcaChatView => view instanceof OrcaChatView);
+	const results = await Promise.allSettled(views.map((view) => view.reloadCredential()));
+	const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+	if (failed) throw failed.reason;
+}
+
+// Status texts stay short:the label ellipsizes past ~25 characters at the default sidebar width.
 const NO_SESSION_STATUS = "No session yet";
 const NOT_PAIRED_STATUS = "Not paired with Orca";
 const SESSION_CHECK_INTERVAL_MS = 15_000;
@@ -237,8 +249,11 @@ export class OrcaChatView extends ItemView {
 
 	// Public for tests. Reattaches to the vault's last session if Orca still has it. A retry (the
 	// liveness tick, or a New session click) doesn't repeat the "can't reach Orca" Notice; nor is
-	// "previous session ended" announced while a New session is underway.
-	async restoreLastSession(retry = false): Promise<void> {
+	// "previous session ended" announced while a New session is underway. `forNewSession` marks the
+	// click's own restore-first retry: any other restore that answers while a New session is running
+	// stands down (no mount, no stored-id clear) — the click decides, and its create would otherwise
+	// replace the reattached session a moment later and lose track of it.
+	async restoreLastSession(retry = false, forNewSession = false): Promise<void> {
 		const gen = this.generation;
 		const id = await this.readStoredSessionId();
 		if (gen !== this.generation) return;
@@ -259,12 +274,17 @@ export class OrcaChatView extends ItemView {
 			if (gen !== this.generation || this.currentSessionId) return;
 			// Keep the stored id, and try again later.
 			this.restorePending = true;
+			// A running New session owns the status and reports its own errors.
+			if (this.busy && !forNewSession) return;
 			if (!retry) this.reportError(err, (message) => `Orca Chat: ${message}`);
 			this.statusLabel.setText("Can't reach Orca");
 			return;
 		}
 		// A New session that finished (or the pane closing) while the list was in flight wins.
 		if (gen !== this.generation || this.currentSessionId) return;
+		// A New session is running and this isn't its own restore: leave restorePending as it is, so
+		// a create that fails still has the stored session retried later.
+		if (this.busy && !forNewSession) return;
 		this.restorePending = false;
 		const tab = tabs.find((t) => t.sessionId === id);
 		if (tab) {
@@ -305,7 +325,7 @@ export class OrcaChatView extends ItemView {
 			// Orca was unreachable when the pane last tried to reattach: if the stored session turns
 			// out to be live, reattach it rather than create another and lose track of it.
 			if (this.restorePending) {
-				await this.restoreLastSession(true);
+				await this.restoreLastSession(true, true);
 				if (gen !== this.generation) return;
 				if (this.currentSessionId) {
 					new Notice("Orca Chat: reattached your previous session");

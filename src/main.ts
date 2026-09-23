@@ -2,7 +2,7 @@ import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { AnnotateModal } from "./annotate-modal";
 import { buildAnnotateMessage, buildObsidianOpenUri, formatLocation, lineRangeFromEditorCursors, readingModeLineRange, sectionInfoToLineTag } from "./annotate-location";
 import { buildFlashcardAskMessage, FlashcardContext, isReviewModalOpen, resolveCurrentFlashcard } from "./flashcard-context";
-import { ORCA_CHAT_VIEW_TYPE, OrcaChatView } from "./chat-view";
+import { ORCA_CHAT_VIEW_TYPE, OrcaChatView, reloadChatViewCredentials } from "./chat-view";
 import { PairingModal } from "./pairing-modal";
 
 const ORCA_LINE_TAG_ATTR = "orcaLine";
@@ -63,19 +63,13 @@ export default class OrcaChatPlugin extends Plugin {
 		this.addCommand({
 			id: "pair-with-orca",
 			name: "Pair with Orca",
-			callback: () => new PairingModal(this.app, this, () => this.reloadChatViewCredentials()).open(),
+			// Open panes read the pairing when they open; after a (re-)pair, have them read it again.
+			callback: () => new PairingModal(this.app, this, () => reloadChatViewCredentials(this.app.workspace)).open(),
 		});
 	}
 
 	onunload() {
 		this.app.workspace.detachLeavesOfType(ORCA_CHAT_VIEW_TYPE);
-	}
-
-	// Open panes read the pairing when they open; after a (re-)pair, have them read it again.
-	private async reloadChatViewCredentials(): Promise<void> {
-		for (const leaf of this.app.workspace.getLeavesOfType(ORCA_CHAT_VIEW_TYPE)) {
-			if (leaf.view instanceof OrcaChatView) await leaf.view.reloadCredential();
-		}
 	}
 
 	async activateChatView(): Promise<WorkspaceLeaf> {

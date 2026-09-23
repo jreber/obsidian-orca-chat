@@ -35,13 +35,23 @@ export class PairingModal extends Modal {
 			submitting = true;
 			pairButton.disabled = true;
 			try {
-				const credential = decodePairingUrl(url);
-				await savePairedCredential(this.plugin, credential);
+				try {
+					const credential = decodePairingUrl(url);
+					await savePairedCredential(this.plugin, credential);
+				} catch (err) {
+					new Notice(err instanceof Error ? err.message : "Failed to pair with Orca");
+					return;
+				}
 				new Notice("Paired with Orca");
 				this.close();
-				await this.onPaired?.();
-			} catch (err) {
-				new Notice(err instanceof Error ? err.message : "Failed to pair with Orca");
+				// The pairing is saved; only refreshing open panes can fail from here.
+				try {
+					await this.onPaired?.();
+				} catch (err) {
+					new Notice("Paired with Orca, but open Orca Chat panes couldn't refresh — reopen the pane.");
+					// The error object only: never the pairing URL or credential.
+					console.error("[orca-chat] couldn't refresh open panes after pairing", err);
+				}
 			} finally {
 				submitting = false;
 				pairButton.disabled = false;

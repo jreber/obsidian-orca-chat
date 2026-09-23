@@ -58,6 +58,32 @@ test("a successful pair calls onPaired after saving the credential", async () =>
 	assert.ok(seen[0], "the credential was saved before onPaired ran");
 });
 
+// The pair itself succeeded; only refreshing open panes failed, so don't say pairing failed.
+test("a pair whose pane refresh fails says so once, not that pairing failed, and keeps the credential", async () => {
+	const { FakeNoticeLog } = obsidianFake;
+	const plugin = new Plugin(new App());
+	const modal = new PairingModal(new App(), plugin, async () => {
+		throw new Error("loadData failed");
+	});
+	const url = await validPairingUrl();
+	FakeNoticeLog.length = 0;
+	const logged: unknown[][] = [];
+	const originalError = console.error;
+	console.error = (...args: unknown[]) => void logged.push(args);
+	try {
+		await submit(modal, url);
+	} finally {
+		console.error = originalError;
+	}
+	assert.deepEqual(FakeNoticeLog, [
+		"Paired with Orca",
+		"Paired with Orca, but open Orca Chat panes couldn't refresh — reopen the pane.",
+	]);
+	assert.ok(((await plugin.loadData()) as { pairedCredential?: unknown }).pairedCredential, "credential still saved");
+	assert.equal(logged.length, 1);
+	assert.ok(!logged[0].map(String).join(" ").includes(url), "the pairing URL isn't logged");
+});
+
 test("a failed pair doesn't call onPaired", async () => {
 	let calls = 0;
 	const modal = new PairingModal(new App(), new Plugin(new App()), () => void calls++);

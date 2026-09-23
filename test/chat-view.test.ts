@@ -959,6 +959,52 @@ test("New session while a restore is pending and the stored session is gone crea
 	assert.deepEqual(FakeNoticeLog, []);
 });
 
+// The tick's retry starts listing before the click; the click's own retry fails (Orca flapping) so
+// it goes on to create; the tick's list then finds s1 alive. Mounting s1 there would reattach it
+// only for the create to replace it a moment later, leaving s1 untracked — the tick must stand down.
+test("a tick restore that answers while New session is creating doesn't mount the stored session", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const tickListed = deferred<unknown[]>();
+	const created = deferred<{ sessionId: string }>();
+	let listCalls = 0;
+	const { client, calls } = fakeCreateClient({
+		listAllAgentSessionTabs: () => {
+			listCalls++;
+			if (listCalls === 2) return tickListed.promise; // the tick's retry
+			return Promise.reject(new OrcaRemoteError("connect ECONNREFUSED")); // open, and the click's retry
+		},
+		createClaudeSession: () => {
+			calls.push("createClaudeSession");
+			return created.promise;
+		},
+	});
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession(); // Orca unreachable: restore pending
+	FakeNoticeLog.length = 0;
+	const ticking = view.checkCurrentSession();
+	await flush();
+	assert.equal(listCalls, 2, "the tick's restore is listing");
+	const creating = view.onNewSession();
+	await flush();
+	assert.equal(listCalls, 3, "the click retried the restore first");
+	assert.ok(calls.includes("createClaudeSession"), "the click went on to create");
+	tickListed.resolve([{ sessionId: "s1", agent: "claude", title: "t" }]);
+	await ticking;
+	await flush();
+	assert.equal(view.getSelectedHandle(), null, "the tick didn't mount s1 under the running create");
+	assert.equal(view.contentEl.querySelector("webview"), null);
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	created.resolve({ sessionId: "new1" });
+	await creating;
+	assert.equal(view.getSelectedHandle(), "new1");
+	assert.equal(view.contentEl.querySelector("webview")?.getAttribute("data-orca-session-id"), "new1");
+	assert.equal(view.getStoredSessionIdForTest(), "new1");
+	assert.ok(!FakeNoticeLog.some((m) => /reattach/i.test(m)), `unexpected Notice: ${FakeNoticeLog.join(" | ")}`);
+});
+
 // --- Stored-id clears only clear the id they found dead (final review M1) ---
 
 // Pane A clicks New session with Z stored and closes; the reopened pane B's slow restore reads Z;
@@ -1066,4 +1112,34 @@ test("reloadCredential picks up a pairing saved after the pane opened", async ()
 	assert.ok(!FakeNoticeLog.some((m) => /Not paired/.test(m)), FakeNoticeLog.join(" | "));
 	assert.ok(calls.includes("createClaudeSession"));
 	await view.onClose();
+});
+
+// main.ts's Pair with Orca callback: refresh every open Orca Chat pane, and only those.
+test("reloadChatViewCredentials reloads only Orca Chat panes, and one failing doesn't stop the others", async () => {
+	const { reloadChatViewCredentials } = await import("../src/chat-view.ts");
+	const reloaded: string[] = [];
+	const failing = makeView();
+	failing.reloadCredential = async () => {
+		reloaded.push("failing");
+		throw new Error("loadData failed");
+	};
+	const ok = makeView();
+	ok.reloadCredential = async () => void reloaded.push("ok");
+	// Another view type that happens to have the same method name must be left alone.
+	const other = { reloadCredential: async () => void reloaded.push("other") };
+	const leaves = [{ view: failing }, { view: other }, { view: ok }];
+	const requested: string[] = [];
+	const workspace = {
+		getLeavesOfType: (type: string) => {
+			requested.push(type);
+			return leaves;
+		},
+	};
+	await assert.rejects(reloadChatViewCredentials(workspace as never), /loadData failed/);
+	assert.deepEqual(requested, [ORCA_CHAT_VIEW_TYPE]);
+	assert.deepEqual(reloaded.sort(), ["failing", "ok"]);
+	reloaded.length = 0;
+	leaves.splice(0, 1);
+	await reloadChatViewCredentials(workspace as never);
+	assert.deepEqual(reloaded, ["ok"]);
 });
