@@ -52,17 +52,28 @@ export const CLAUDE_MD_NOTE = "This vault has a CLAUDE.md, and current Claude Co
 // The parts of Obsidian's Vault this needs (paths are vault-relative). The write goes through
 // Vault#process, so it is atomic with an open editor's pending save; `adapter.exists` sees files the
 // vault doesn't index (.claude/).
-export type AdviceVault<F> = {
+export type AdviceVault<F extends { path: string }> = {
 	getFileByPath(path: string): F | null;
+	getFiles(): F[];
 	read(file: F): Promise<string>;
 	process(file: F, fn: (data: string) => string): Promise<string>;
 	create(path: string, data: string): Promise<unknown>;
 	adapter: { exists(path: string): Promise<boolean> };
 };
 
+// On a case-insensitive filesystem (macOS and Windows by default) a root `agents.md` is AGENTS.md, but
+// the vault indexes it under its own spelling, so creating AGENTS.md would fail with "already exists".
+// The filesystem decides: the adapter's (case-insensitive there) exists says whether such a file is
+// AGENTS.md. On a case-sensitive one, `agents.md` is a different file and AGENTS.md is created.
+async function differentlyCasedAgentsFile<F extends { path: string }>(vault: AdviceVault<F>): Promise<F | null> {
+	if (!(await vault.adapter.exists(AGENTS_FILE))) return null;
+	const name = AGENTS_FILE.toLowerCase();
+	return vault.getFiles().find((f) => f.path.toLowerCase() === name) ?? null;
+}
+
 // Writes the advice into the vault root's AGENTS.md; resolves to the Notice text.
-export async function appendAgentsAdvice<F>(vault: AdviceVault<F>): Promise<string> {
-	const file = vault.getFileByPath(AGENTS_FILE);
+export async function appendAgentsAdvice<F extends { path: string }>(vault: AdviceVault<F>): Promise<string> {
+	const file = vault.getFileByPath(AGENTS_FILE) ?? (await differentlyCasedAgentsFile(vault));
 	let action: AdviceResult["action"];
 	if (!file) {
 		const result = applyAdvice(null);

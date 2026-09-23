@@ -78,6 +78,7 @@ function fakeVault(files: Record<string, string>) {
 		writes,
 		vault: {
 			getFileByPath: (p: string) => (p in files && !p.startsWith(".") ? file(p) : null),
+			getFiles: () => Object.keys(files).filter((p) => !p.startsWith(".")).map(file),
 			read: async (f: { path: string }) => files[f.path],
 			process: async (f: { path: string }, fn: (data: string) => string) => {
 				const next = fn(files[f.path]);
@@ -137,4 +138,37 @@ test("a vault with a CLAUDE.md: the Notice says Claude Code may read that instea
 		assert.equal(files[claudeMd], "# mine\n", "CLAUDE.md is never touched");
 		assert.equal(await appendAgentsAdvice(vault), `${UPDATED_NOTICE}. ${CLAUDE_MD_NOTE}`);
 	}
+});
+
+// A case-insensitive filesystem (macOS and Windows by default): the vault indexes `agents.md` under
+// its own spelling, but the filesystem takes AGENTS.md to be the same file.
+function insensitiveVault(files: Record<string, string>) {
+	const fake = fakeVault(files);
+	const same = (p: string) => Object.keys(files).find((k) => k.toLowerCase() === p.toLowerCase());
+	const create = fake.vault.create;
+	Object.assign(fake.vault, {
+		create: async (p: string, data: string) => {
+			if (same(p) !== undefined) throw new Error("File already exists.");
+			return create(p, data);
+		},
+		adapter: { exists: async (p: string) => same(p) !== undefined },
+	});
+	return fake;
+}
+
+test("a differently-cased agents.md on a case-insensitive filesystem is written in place, not re-created", async () => {
+	const { vault, files } = insensitiveVault({ "agents.md": "Mine.\n", "Notes/AGENTS.md": "not the root\n" });
+	assert.equal(await appendAgentsAdvice(vault), ADDED_NOTICE);
+	assert.equal(files["agents.md"], "Mine.\n\n" + BLOCK);
+	assert.equal(await appendAgentsAdvice(vault), UPDATED_NOTICE);
+	assert.equal(files["agents.md"], "Mine.\n\n" + BLOCK);
+	assert.equal(files["Notes/AGENTS.md"], "not the root\n");
+	assert.deepEqual(Object.keys(files).sort(), ["Notes/AGENTS.md", "agents.md"]);
+});
+
+test("on a case-sensitive filesystem a lowercase agents.md is a different file: AGENTS.md is created", async () => {
+	const { vault, files } = fakeVault({ "agents.md": "Mine.\n" });
+	assert.equal(await appendAgentsAdvice(vault), ADDED_NOTICE);
+	assert.equal(files["AGENTS.md"], BLOCK);
+	assert.equal(files["agents.md"], "Mine.\n");
 });
