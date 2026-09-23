@@ -5,6 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } fro
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { FakeOrcaServer } from "../protocol/fake-orca-server";
+import type { PairedCredential } from "../../src/orca-pairing";
 
 const FIXTURE_VAULT = path.resolve(import.meta.dirname, "../fixture-vault");
 const FLATPAK_APP_ID = "md.obsidian.Obsidian";
@@ -80,6 +81,9 @@ type Fixtures = {
 	vaultPath: string;
 	// Option: false launches with no pairedCredential in the plugin's data.json.
 	paired: boolean;
+	// What the plugin is paired with when `paired`: the fake server's credential by default. A spec
+	// pairing with a real Orca overrides this fixture (and then no fake server is started).
+	pairedCredential: PairedCredential;
 };
 
 export const test = base.extend<Fixtures>({
@@ -89,6 +93,10 @@ export const test = base.extend<Fixtures>({
 		const server = await FakeOrcaServer.start();
 		await use(server);
 		await server.stop();
+	},
+
+	pairedCredential: async ({ server }, use) => {
+		await use(server.credential);
 	},
 
 	vaultDir: async ({}, use) => {
@@ -137,12 +145,12 @@ export const test = base.extend<Fixtures>({
 	// own startup routine (`ke()` in main.js) opens whichever vaults are marked `open: true` in its
 	// vault registry, which is exactly what pre-seeding the config accomplishes, with no vault-picker
 	// screen in between.
-	obsidian: async ({ server, vaultDir, paired }, use) => {
+	obsidian: async ({ pairedCredential, vaultDir, paired }, use) => {
 		const userDataDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-userdata-"));
 		cpSync(FIXTURE_VAULT, vaultDir, { recursive: true });
 		writeFileSync(
 			path.join(vaultDir, ".obsidian", "plugins", "orca-chat", "data.json"),
-			JSON.stringify(paired ? { pairedCredential: server.credential } : {}),
+			JSON.stringify(paired ? { pairedCredential } : {}),
 		);
 		writeFileSync(
 			path.join(userDataDir, "obsidian.json"),
