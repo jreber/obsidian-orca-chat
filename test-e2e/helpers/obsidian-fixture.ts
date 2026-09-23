@@ -265,10 +265,19 @@ async function closeStrayWindows(browser: Browser, mainPage: Page): Promise<void
 	for (const page of browser.contexts().flatMap((ctx) => ctx.pages())) {
 		if (page !== mainPage) await page.close().catch(() => {});
 	}
-	await mainPage.bringToFront();
-	await mainPage.waitForFunction(() => (window as unknown as { activeDocument?: Document }).activeDocument === document, undefined, {
-		timeout: 10_000,
-	});
+	// A single bringToFront can lose to the window manager while the closed window's focus is still
+	// being handed back (seen as an occasional 10 s timeout), so re-request focus until it sticks.
+	const deadline = Date.now() + 15_000;
+	for (;;) {
+		await mainPage.bringToFront();
+		const focused = await mainPage
+			.waitForFunction(() => (window as unknown as { activeDocument?: Document }).activeDocument === document, undefined, {
+				timeout: 1_000,
+			})
+			.then(() => true, () => false);
+		if (focused) return;
+		if (Date.now() > deadline) throw new Error("Obsidian's main window never took focus after closing stray windows");
+	}
 }
 
 export { expect } from "@playwright/test";
