@@ -15,6 +15,7 @@ const obsidianFake = await import("./fakes/obsidian.ts");
 obsidianFake.installDomExtensions();
 const { App, Plugin } = obsidianFake;
 const { PairingModal } = await import("../src/pairing-modal.ts");
+const { loadPairedCredential } = await import("../src/orca-pairing.ts");
 
 // A mobile-scope pairing (Orca's mobile QR) is refused repo.add / worktree.list, so New session
 // can't work with it; the modal walks through getting the right ("This computer only") link.
@@ -70,11 +71,12 @@ test("a successful pair calls onPaired after saving the credential", async () =>
 	const plugin = new Plugin(new App());
 	const seen: unknown[] = [];
 	const modal = new PairingModal(new App(), plugin, async () => {
-		seen.push(((await plugin.loadData()) as { pairedCredential?: unknown }).pairedCredential);
+		seen.push(await loadPairedCredential(plugin as never));
 	});
 	await submit(modal, await validPairingUrl());
 	assert.equal(seen.length, 1);
 	assert.ok(seen[0], "the credential was saved before onPaired ran");
+	assert.ok(!JSON.stringify((await plugin.loadData()) ?? {}).includes("deviceToken"), "never in the synced data.json");
 });
 
 // The pair itself succeeded; only refreshing open panes failed, so don't say pairing failed.
@@ -98,7 +100,7 @@ test("a pair whose pane refresh fails says so once, not that pairing failed, and
 		"Paired with Orca",
 		"Paired with Orca, but open Orca Chat panes couldn't refresh — reopen the pane.",
 	]);
-	assert.ok(((await plugin.loadData()) as { pairedCredential?: unknown }).pairedCredential, "credential still saved");
+	assert.ok(await loadPairedCredential(plugin as never), "credential still saved");
 	assert.equal(logged.length, 1);
 	assert.ok(!logged[0].map(String).join(" ").includes(url), "the pairing URL isn't logged");
 });

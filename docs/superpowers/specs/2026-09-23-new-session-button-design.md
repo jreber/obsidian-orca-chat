@@ -49,7 +49,7 @@ respect (tab in Orca, Agent Dashboard card, history), and the pane embeds it exa
    session id up in `session.tabs.listAll`. A session found either way is attached as a normal
    success, so a slow create never leaves an orphaned chat in Orca; only if neither finds it does the
    pane show "⚠ Session not created".
-6. Persist `lastSessionId` in the vault's `data.json` (beside `pairedCredential`). Mount the embed.
+6. Persist the session id as this device's last session (see Storage). Mount the embed.
    Orca's seed-turn fix means the session appears on the Agent Dashboard immediately.
 
 ## Pane behavior
@@ -62,6 +62,27 @@ respect (tab in Orca, Agent Dashboard card, history), and the pane embeds it exa
 - `sendToSelected` (annotate and flashcard flows) targets the current session; with none, it says to
   create one first.
 - A 15 s existence check for the current session only (not the old list refresh) detects a session closed in Orca.
+
+## Storage: per device, never in the synced data.json
+
+A vault may be synced between computers (iCloud, Obsidian Sync, git), and each computer pairs with
+its own Orca. So the pairing credential and the last session id are per device: they live in
+Obsidian's per-device, per-vault local storage (`App#saveLocalStorage` / `App#loadLocalStorage`,
+keys `orca-chat:paired-credential` and `orca-chat:last-session-id`), which is not synced. The
+plugin's `data.json` keeps any other settings. These APIs are public since Obsidian 1.8.7, so
+`minAppVersion` is 1.8.7.
+
+- Reads and writes of both values go through one per-plugin queue, so the stored-id
+  compare-and-set (a late create after the pane closed, a restore's clear) keeps its guarantees.
+- **One-time migration.** Earlier versions kept both in `data.json`. On load (and before any other
+  pairing or session read or write), the plugin moves them into local storage and removes them from
+  `data.json`, keeping other settings. A value the device already has is never overwritten, and a
+  synced session id is taken only when the device has no pairing of its own. The device is then
+  marked migrated (`orca-chat:device-storage-migrated`): later copies in `data.json` (say, synced
+  from a machine still on an older version) are only removed, never imported, so another machine's
+  writes never change this device's pairing or session. If `data.json` can't be read before the
+  first migration, the operation fails and the migration is retried; a failed cleanup is logged
+  without the data and retried on the next load. The credential is never logged.
 
 ## Orca change
 
@@ -193,7 +214,7 @@ files have uncommitted changes, `unknown` without git), and `versionLabel()`
   wikilinks. A wikilink split across several text nodes by the renderer would not be linked (not seen
   with Orca's current renderer).
 - Rare races left as documented: re-pairing during a create can leave the pane on the previous session
-  until reopened; a hung `saveData` can hold the New session button disabled.
+  until reopened.
 
 ## How to try it on macOS
 
@@ -203,6 +224,9 @@ files have uncommitted changes, `unknown` without git), and `versionLabel()`
    `manifest.json` and `styles.css` into the vault's `.obsidian/plugins/orca-chat/`, reload the plugin.
    Commit or `git stash -u` any local edits first (a stray edit to `orca-remote-client.ts` breaks the build).
 3. In Orca use the "This computer only" pairing link; in Obsidian run **Pair with Orca** and paste it.
+   The pairing is stored on this Mac only (Obsidian's local storage, not the synced `data.json`), so
+   pair each computer with its own Orca. An existing pairing from an earlier build is moved out of
+   `data.json` automatically on first load; nothing to do. Needs Obsidian 1.8.7 or later.
 4. Open the Orca Chat pane and click **New session**. Approve "Add this vault to Orca?" once.
 5. Expect: "Connecting…" then "● Live chat"; the chat visible in the pane; the vault as a project and a
    "Claude Chat" card on Orca's Agent Dashboard. Reopening the pane reattaches to the same chat.

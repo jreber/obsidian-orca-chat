@@ -44,7 +44,7 @@ export async function startNewSession(obsidian: Page, server: FakeOrcaServer, va
 }
 
 // Closes every Orca Chat pane and opens a fresh one, as a user reopening it would; the new view
-// reads the stored last-session id from the plugin's data.json.
+// reads the stored last-session id from this device's local storage.
 export async function reopenPane(obsidian: Page): Promise<void> {
 	await obsidian.evaluate(() => {
 		const win = window as unknown as {
@@ -59,13 +59,11 @@ export async function reopenPane(obsidian: Page): Promise<void> {
 	await obsidian.waitForSelector(".orca-chat-new-session");
 }
 
-// The stored last-session id as the plugin itself reads it.
+// The stored last-session id as the plugin itself reads it: from this device's local storage.
 export async function storedSessionId(obsidian: Page): Promise<string | null> {
-	return obsidian.evaluate(async () => {
-		const win = window as unknown as {
-			app: { plugins: { plugins: Record<string, { loadData: () => Promise<{ lastSessionId?: string | null } | null> }> } };
-		};
-		const data = await win.app.plugins.plugins["orca-chat"].loadData();
-		return data?.lastSessionId ?? null;
+	return obsidian.evaluate(() => {
+		const win = window as unknown as { app: { loadLocalStorage: (key: string) => unknown } };
+		const id = win.app.loadLocalStorage("orca-chat:last-session-id");
+		return typeof id === "string" ? id : null;
 	});
 }

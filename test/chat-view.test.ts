@@ -24,6 +24,7 @@ const { OrcaChatView, ORCA_CHAT_VIEW_TYPE, ADVICE_BUTTON_TOOLTIP, interceptObsid
 );
 const { shell } = await import("electron");
 const { OrcaRemoteError } = await import("../src/orca-remote-client.ts");
+const { DEVICE_STORAGE_MIGRATED_KEY, LAST_SESSION_ID_KEY } = await import("../src/orca-pairing.ts");
 
 function makeView() {
 	return new OrcaChatView(new WorkspaceLeaf(), new Plugin(new App()));
@@ -669,18 +670,27 @@ function captureNextModal() {
 	return { captured, restore: () => (obsidianFake.Modal.prototype.open = originalOpen) };
 }
 
-// A desktop view backed by the fake plugin's real loadData/saveData (not the stored-id override),
-// so the stored id goes through saveLastSessionId's read-modify-write like it does in Obsidian.
-async function openDesktopViewWithData(data: Record<string, unknown>) {
+// A desktop view backed by the fake app's real device storage (not the stored-id override), so the
+// stored id goes through saveLastSessionId's queued read-modify-write like it does in Obsidian.
+async function openDesktopViewWithData(data: { lastSessionId: string | null }) {
 	const app = new App();
 	app.vault.adapter = new obsidianFake.FileSystemAdapter("/vault");
 	const plugin = new Plugin(app);
-	await plugin.saveData(data);
+	app.saveLocalStorage(DEVICE_STORAGE_MIGRATED_KEY, true);
+	app.saveLocalStorage(LAST_SESSION_ID_KEY, data.lastSessionId);
 	const view = new OrcaChatView(new WorkspaceLeaf(), plugin);
 	await view.onOpen();
 	view.setCredentialForTest(FAKE_CREDENTIAL);
-	const storedId = async () => ((await plugin.loadData()) as { lastSessionId?: string | null }).lastSessionId ?? null;
+	const storedId = async () => (app.loadLocalStorage(LAST_SESSION_ID_KEY) as string | null) ?? null;
 	return { view, plugin, storedId };
+}
+
+// Holds this plugin's stored-id writes as `hold` says (a slow write, in Obsidian terms).
+function holdSessionIdWrites(plugin: InstanceType<typeof Plugin>, hold: (write: () => void) => Promise<void>): void {
+	const app = plugin.app;
+	const realSave = app.saveLocalStorage.bind(app);
+	app.saveLocalStorage = (key: string, data: unknown) =>
+		key === LAST_SESSION_ID_KEY ? hold(() => void realSave(key, data)) : realSave(key, data);
 }
 
 test("New session: 'Creating session…' only shows once the add-project prompt is confirmed", async () => {
@@ -735,13 +745,12 @@ test("a restore's clear still being written can't overwrite the id New session s
 	const { view, plugin, storedId } = await openDesktopViewWithData({ lastSessionId: "s1" });
 	const { client } = fakeCreateClient(); // listAll → [] so the restore clears s1
 	view.setClientForTest(client);
-	const realSave = plugin.saveData.bind(plugin);
 	const heldSave = deferred<void>();
 	let saves = 0;
-	plugin.saveData = async (data: unknown) => {
+	holdSessionIdWrites(plugin, async (write) => {
 		if (saves++ === 0) await heldSave.promise; // the restore's clear lands late
-		return realSave(data);
-	};
+		write();
+	});
 	FakeNoticeLog.length = 0;
 	const restoring = view.restoreLastSession();
 	await flush();
@@ -855,13 +864,12 @@ test("a New session whose stored-id write was queued and skipped by a close stil
 		createClaudeSession: () => created.promise,
 	});
 	view.setClientForTest(client);
-	const realSave = plugin.saveData.bind(plugin);
 	const heldSave = deferred<void>();
 	let saves = 0;
-	plugin.saveData = async (data: unknown) => {
-		await realSave(data);
-		if (saves++ === 0) await heldSave.promise; // the restore's clear is on disk but still pending
-	};
+	holdSessionIdWrites(plugin, async (write) => {
+		write();
+		if (saves++ === 0) await heldSave.promise; // the restore's clear is stored but still pending
+	});
 	FakeNoticeLog.length = 0;
 	const restoring = view.restoreLastSession();
 	await flush();
@@ -1198,7 +1206,7 @@ test("the liveness check's clear doesn't erase an id stored after the session wa
 	await view.restoreLastSession();
 	assert.equal(view.getSelectedHandle(), "s1");
 	listAll = async () => [];
-	await plugin.saveData({ ...((await plugin.loadData()) as object), lastSessionId: "other" }); // e.g. another pane
+	plugin.app.saveLocalStorage(LAST_SESSION_ID_KEY, "other"); // e.g. another pane
 	await view.checkCurrentSession();
 	assert.equal(view.getSelectedHandle(), null);
 	assert.equal(await storedId(), "other");
@@ -1209,9 +1217,9 @@ test("the liveness check's clear doesn't erase an id stored after the session wa
 test("New session: a stored-id write failure still mounts the created chat and says it won't be remembered", async () => {
 	const { view, plugin } = await openDesktopViewWithData({ lastSessionId: null });
 	view.setClientForTest(fakeCreateClient().client);
-	plugin.saveData = async () => {
-		throw new Error("disk full");
-	};
+	holdSessionIdWrites(plugin, async () => {
+		throw new Error("quota exceeded");
+	});
 	FakeNoticeLog.length = 0;
 	const originalError = console.error;
 	console.error = () => {};

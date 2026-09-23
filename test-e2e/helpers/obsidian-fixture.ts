@@ -79,7 +79,9 @@ type Fixtures = {
 	// The vault root exactly as Obsidian reports it (FileSystemAdapter#getBasePath) — the value the
 	// plugin sends to repo.add and matches repo.list against. Register repos on the fake with this.
 	vaultPath: string;
-	// Option: false launches with no pairedCredential in the plugin's data.json.
+	// Option: false launches unpaired. When true, the credential is seeded where an older version
+	// kept it, the plugin's data.json: a fresh --user-data-dir has empty local storage, and the
+	// plugin's one-time migration moves it into this device's storage on load.
 	paired: boolean;
 	// What the plugin is paired with when `paired`: the fake server's credential by default. A spec
 	// pairing with a real Orca overrides this fixture (and then no fake server is started).

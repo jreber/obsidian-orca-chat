@@ -133,6 +133,17 @@ export class App {
 	workspace: Record<string, unknown> = {};
 	vault = new FakeVault() as FakeVault & Record<string, unknown>;
 	metadataCache = new FakeMetadataCache();
+	// Obsidian's per-device, per-vault local storage: values are stored as JSON, and null clears.
+	localStore = new Map<string, string>();
+	loadLocalStorage(key: string): unknown {
+		const raw = this.localStore.get(key);
+		return raw === undefined ? null : JSON.parse(raw);
+	}
+	saveLocalStorage(key: string, data: unknown): unknown {
+		if (data === null || data === undefined) this.localStore.delete(key);
+		else this.localStore.set(key, JSON.stringify(data));
+		return undefined;
+	}
 }
 
 export class TFile {

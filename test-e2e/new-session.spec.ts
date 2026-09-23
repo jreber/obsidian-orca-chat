@@ -1,4 +1,5 @@
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/obsidian-fixture";
 import {
@@ -238,4 +239,22 @@ test.describe("not paired", () => {
 		expect(server.received("repo.list")).toHaveLength(0);
 		expect(server.received("agentSession.create")).toHaveLength(0);
 	});
+});
+
+// The pairing and last session are per device (Obsidian's local storage), never in the synced
+// data.json. The fixture seeds the pairing into data.json as an older version kept it.
+test("a pairing in data.json from an older version is moved to this device's storage", async ({ server, obsidian, vaultDir, vaultPath }) => {
+	const dataFile = path.join(vaultDir, ".obsidian", "plugins", "orca-chat", "data.json");
+	await expect.poll(() => readFileSync(dataFile, "utf8")).not.toContain("pairedCredential");
+	const local = await obsidian.evaluate(() => {
+		const win = window as unknown as { app: { loadLocalStorage: (key: string) => unknown } };
+		return win.app.loadLocalStorage("orca-chat:paired-credential") as { endpoint?: string } | null;
+	});
+	expect(local?.endpoint).toBe(server.credential.endpoint);
+
+	await startNewSession(obsidian, server, vaultPath);
+	const sessionId = createCalls(server)[0].envelope.sessionId;
+	expect(await storedSessionId(obsidian)).toBe(sessionId);
+	expect(readFileSync(dataFile, "utf8")).not.toContain(sessionId);
+	expect(readFileSync(dataFile, "utf8")).not.toContain(server.credential.deviceToken);
 });
