@@ -23,8 +23,12 @@ respect (tab in Orca, Agent Dashboard card, history), and the pane embeds it exa
 1. Resolve the vault root (`FileSystemAdapter.getBasePath()`). Desktop only; on mobile the button shows
    "Orca Chat needs desktop Obsidian".
 2. `repo.list`; find a project whose `path` equals the vault root. The plugin compares paths itself:
-   Unicode NFC, trailing slash trimmed, exact case. It does not lowercase or resolve symlinks (Orca's
-   own comparison does neither).
+   exactly as Orca's own `normalizeRuntimePathForComparison` does. Unicode NFC everywhere. A Windows
+   drive or UNC path (`C:\…`, `\\server\…`) compares case-insensitively, with backslashes folded
+   to `/`, repeated separators collapsed and the trailing separator trimmed (a `C:/` root is kept). A
+   POSIX path compares in exact case, with repeated `/` collapsed and a trailing `/` trimmed (the `/`
+   root is kept). Symlinks are not resolved. The comparison key is never sent: `repo.add` gets the
+   raw vault path.
 3. No match: show the confirmation modal. Confirm calls `repo.add {path, kind: 'folder', displayName:
    <vault name>}` (`kind` must be explicit; Orca defaults to `git`). Decline aborts with nothing created.
    `repo.add` is idempotent for an already-registered path.
@@ -63,7 +67,8 @@ declining the add-project prompt is not an error: nothing is created and no Noti
 
 ## Testing (required)
 
-- **Unit (plugin):** path matching (NFC, trailing slash, exact case); create envelope and fingerprint
+- **Unit (plugin):** path matching (NFC, separators and trailing slash, Windows drive/UNC case folding, POSIX exact
+  case); create envelope and fingerprint
   equal Orca's computation; the call sequence with each step failing; reattach with a live, missing,
   and never-stored session.
 - **Unit (Orca):** override resolution: unset, absolute path, `~/…`, whitespace, non-existent.
@@ -77,8 +82,9 @@ declining the add-project prompt is not an error: nothing is created and no Noti
   and on Orca's dashboard. This also settles two open questions live: that the plugin's client may
   call `repo.add`/`worktree.list`, and that `path:<vault>` (fallback selector) works.
 - **Cannot be tested on the Linux dev machine (verify on the Mac):** macOS default paths, the real
-  `~/bin/local-claude`, and case-insensitive path collisions (`/Users/x/Vault` vs `/users/x/vault` would
-  register twice; documented limitation, same as Orca).
+  `~/bin/local-claude`, and case-only path differences on macOS's case-insensitive filesystem
+  (`/Users/x/Vault` vs `/users/x/vault` would register twice, because POSIX paths compare in exact
+  case; a documented limitation, same as Orca). Windows paths fold case, so they don't have it.
 
 ## Out of scope
 
