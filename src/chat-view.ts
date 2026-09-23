@@ -19,7 +19,7 @@ import {
 	saveLastSessionIdIf,
 	type PairedCredential,
 } from "./orca-pairing";
-import { OrcaRemoteClient, OrcaRemoteError, type StructuredSessionTab } from "./orca-remote-client";
+import { isPairingRejected, OrcaRemoteClient, OrcaRemoteError, type StructuredSessionTab } from "./orca-remote-client";
 import { getVaultRootPath } from "./vault-path";
 import { interceptWikilinks } from "./wikilinks";
 
@@ -159,6 +159,12 @@ export async function reloadChatViewCredentials(workspace: Pick<Workspace, "getL
 // Status texts stay short: the label ellipsizes past ~25 characters at the default sidebar width.
 const NO_SESSION_STATUS = "No session yet";
 const NOT_PAIRED_STATUS = "Not paired with Orca";
+const PAIRING_REJECTED_STATUS = "⚠ Re-pair this computer";
+// Earlier versions synced the pairing with the vault, so after an update a computer can hold the
+// pairing another computer made with its own Orca.
+export const PAIRING_REJECTED_NOTICE =
+	"Orca Chat: Orca didn't accept this computer's pairing. It may be another computer's (pairings used to sync with the vault). " +
+	"Run Pair with Orca on this computer, using a \"This computer only\" link from this computer's Orca.";
 const SESSION_CHECK_INTERVAL_MS = 15_000;
 export const ADVICE_BUTTON_TOOLTIP =
 	"Adds (or updates) a block in the vault's AGENTS.md telling the chat's agent to be brief and to link notes as [[wikilinks]]. Text outside the block is left alone.";
@@ -324,7 +330,7 @@ export class OrcaChatView extends ItemView {
 			// A running New session owns the status and reports its own errors.
 			if (this.busy && !forNewSession) return;
 			if (!retry) this.reportError(err, (message) => `Orca Chat: ${message}`);
-			this.statusLabel.setText("Can't reach Orca");
+			this.statusLabel.setText(isPairingRejected(err) ? PAIRING_REJECTED_STATUS : "Can't reach Orca");
 			return;
 		}
 		// A New session that finished (or the pane closing) while the list was in flight wins.
@@ -420,7 +426,7 @@ export class OrcaChatView extends ItemView {
 				this.statusLabel.setText(this.currentStatus());
 			} else {
 				this.reportError(err, newSessionFailureMessage);
-				this.statusLabel.setText("⚠ Session not created");
+				this.statusLabel.setText(isPairingRejected(err) ? PAIRING_REJECTED_STATUS : "⚠ Session not created");
 			}
 		} finally {
 			this.busy = false;
@@ -660,7 +666,10 @@ export class OrcaChatView extends ItemView {
 	}
 
 	private reportError(err: unknown, describe: (message: string) => string = (message) => message): void {
-		if (err instanceof OrcaRemoteError || err instanceof OrcaPairingError || err instanceof NewSessionError) {
+		if (isPairingRejected(err)) {
+			// Longer than the default few seconds: it says what to do.
+			new Notice(PAIRING_REJECTED_NOTICE, 15_000);
+		} else if (err instanceof OrcaRemoteError || err instanceof OrcaPairingError || err instanceof NewSessionError) {
 			new Notice(describe(err.message));
 		} else {
 			new Notice("Orca Chat: unexpected error, see console");

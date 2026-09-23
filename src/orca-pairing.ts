@@ -60,11 +60,13 @@ async function saveDeviceValue(plugin: Plugin, key: string, value: unknown): Pro
 type LegacyPluginData = { pairedCredential?: PairedCredential | null; lastSessionId?: string | null } & Record<string, unknown>;
 
 // Moves a pairing and last session that earlier versions kept in data.json into this device's
-// storage, once, and removes them from data.json. A value this device already has is never
-// overwritten, and a last session is only taken when this device has no pairing of its own (a
-// session id from another machine's Orca means nothing here). After the first run on a device,
-// copies found in data.json (say, synced from a machine still on an older version) are only
+// storage, once, and removes them from data.json. A value this device already has (only possible
+// when an earlier run was interrupted part-way) is never overwritten. After the first run on a
+// device, copies found in data.json (say, synced from a machine still on an older version) are only
 // removed, never imported.
+// A synced data.json held the pairing of whichever computer paired last, so the moved pairing can be
+// another computer's. Nothing here can tell; when that computer's Orca rejects it, the pane says to
+// re-pair this computer (see isPairingRejected).
 async function migrateToDeviceStorage(plugin: Plugin): Promise<void> {
 	const migrated = loadDeviceValue(plugin, DEVICE_STORAGE_MIGRATED_KEY) === true;
 	let data: LegacyPluginData;
@@ -78,11 +80,11 @@ async function migrateToDeviceStorage(plugin: Plugin): Promise<void> {
 		return;
 	}
 	if (!migrated) {
-		if (loadDeviceValue(plugin, PAIRED_CREDENTIAL_KEY) === null) {
-			if (data.pairedCredential) await saveDeviceValue(plugin, PAIRED_CREDENTIAL_KEY, data.pairedCredential);
-			if (data.lastSessionId && loadDeviceValue(plugin, LAST_SESSION_ID_KEY) === null) {
-				await saveDeviceValue(plugin, LAST_SESSION_ID_KEY, data.lastSessionId);
-			}
+		if (data.pairedCredential && loadDeviceValue(plugin, PAIRED_CREDENTIAL_KEY) === null) {
+			await saveDeviceValue(plugin, PAIRED_CREDENTIAL_KEY, data.pairedCredential);
+		}
+		if (data.lastSessionId && loadDeviceValue(plugin, LAST_SESSION_ID_KEY) === null) {
+			await saveDeviceValue(plugin, LAST_SESSION_ID_KEY, data.lastSessionId);
 		}
 		await saveDeviceValue(plugin, DEVICE_STORAGE_MIGRATED_KEY, true);
 	}

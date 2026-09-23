@@ -67,6 +67,20 @@ function toOrcaRemoteError(err: unknown): OrcaRemoteError {
 	return new OrcaRemoteError("Unknown Orca remote error", err);
 }
 
+// Orca turned the pairing itself away, as opposed to being unreachable: it answers a device token it
+// doesn't know with `unauthorized`, and closes with 4001 when it can't decrypt the auth frame (the
+// pairing holds another Orca's key) or the handshake is otherwise refused. A malformed handshake
+// reply counts too: whatever answers at the pairing's address isn't the Orca that made it.
+export function isPairingRejected(err: unknown): boolean {
+	const cause = err instanceof OrcaRemoteError ? err.cause : err;
+	if (!(cause instanceof RemoteRuntimeClientError)) return false;
+	return (
+		cause.code === "unauthorized" ||
+		cause.closeCode === 4001 ||
+		(cause.code === "invalid_runtime_response" && cause.pairingStage === "host-identity")
+	);
+}
+
 function unwrapResponse<T>(response: RuntimeRpcResponse<T>): T {
 	if (!response.ok) {
 		throw new OrcaRemoteError(response.error.message, response.error);

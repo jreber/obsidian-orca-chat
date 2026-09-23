@@ -17,6 +17,9 @@ import type {
 	AgentJournalPromptOption,
 } from "../../src/orca-remote-client";
 
+// The one device token this fake accepts: its credential's.
+const DEVICE_TOKEN = "fake-e2e-device-token";
+
 export function historyPage(sessionId: string, items: AgentJournalRenderItem[], fence = 1): AgentSessionHistoryPage {
 	return {
 		sessionId,
@@ -159,7 +162,7 @@ export class FakeOrcaServer {
 		return {
 			v: 2,
 			endpoint: `ws://127.0.0.1:${this.port}`,
-			deviceToken: "fake-e2e-device-token",
+			deviceToken: DEVICE_TOKEN,
 			publicKeyB64: publicKeyToBase64(this.keyPair.publicKey),
 			scope: "runtime",
 		};
@@ -255,7 +258,7 @@ export class FakeOrcaServer {
 	}
 
 	private handleConnection(ws: WebSocket): void {
-		acceptOrcaConnection(ws, this.keyPair, (conn, request) => {
+		acceptOrcaConnection(ws, this.keyPair, DEVICE_TOKEN, (conn, request) => {
 			const method = String(request.method);
 			const calls = this.receivedCalls.get(method) ?? [];
 			calls.push(request.params);

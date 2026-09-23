@@ -79,13 +79,23 @@ plugin's `data.json` keeps any other settings. These APIs are public since Obsid
   compare-and-set (a late create after the pane closed, a restore's clear) keeps its guarantees.
 - **One-time migration.** Earlier versions kept both in `data.json`. On load (and before any other
   pairing or session read or write), the plugin moves them into local storage and removes them from
-  `data.json`, keeping other settings. A value the device already has is never overwritten, and a
-  synced session id is taken only when the device has no pairing of its own. The device is then
+  `data.json`, keeping other settings. A value the device already has (only possible after an
+  interrupted first run) is never overwritten. The device is then
   marked migrated (`orca-chat:device-storage-migrated`): later copies in `data.json` (say, synced
   from a machine still on an older version) are only removed, never imported, so another machine's
   writes never change this device's pairing or session. If `data.json` can't be read before the
   first migration, the operation fails and the migration is retried; a failed cleanup is logged
   without the data and retried on the next load. The credential is never logged.
+- **Pairings are no longer synced: pair each computer once after updating.** The synced `data.json`
+  held the pairing of whichever computer paired last, so the migration can hand a computer another
+  computer's pairing (and that computer then loses its own, once the cleaned `data.json` syncs back).
+  When Orca rejects the pairing (an unknown device token, or a close with 4001 because the auth frame
+  was sealed for another Orca's key; `isPairingRejected`), the pane says so instead of showing a
+  transport error: the Notice "Orca didn't accept this computer's pairing… Run Pair with Orca on this
+  computer, using a "This computer only" link…" and the status "⚠ Re-pair this computer". The
+  Notice is shown when the pane opens (or re-reads the pairing) and on each New session click; the
+  liveness tick's quiet retries only keep the status. Orca being down or unreachable is reported as
+  before ("Can't reach Orca").
 
 ## Orca change
 
@@ -230,8 +240,12 @@ files have uncommitted changes, `unknown` without git), and `versionLabel()`
    Commit or `git stash -u` any local edits first (a stray edit to `orca-remote-client.ts` breaks the build).
 3. In Orca use the "This computer only" pairing link; in Obsidian run **Pair with Orca** and paste it.
    The pairing is stored on this Mac only (Obsidian's local storage, not the synced `data.json`), so
-   pair each computer with its own Orca. An existing pairing from an earlier build is moved out of
-   `data.json` automatically on first load; nothing to do. Needs Obsidian 1.8.7 or later.
+   pair each computer with its own Orca. **If you use this vault on more than one computer, run Pair
+   with Orca on each of them after updating, each with its own Orca's "This computer only" link.**
+   Pairings are no longer synced: an existing pairing from an earlier build is moved out of
+   `data.json` on first load, but it belonged to whichever computer paired last, so it may be the
+   other computer's (the pane then says "⚠ Re-pair this computer"), and the other computer finds
+   itself unpaired once the cleaned `data.json` syncs. Needs Obsidian 1.8.7 or later.
 4. Open the Orca Chat pane and click **New session**. Approve "Add this vault to Orca?" once.
 5. Expect: "Connecting…" then "● Live chat"; the chat visible in the pane, empty until you write the
    first message; the vault as a project and the chat in Orca's sidebar. Reopening the pane

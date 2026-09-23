@@ -394,6 +394,66 @@ test("Orca unreachable at open keeps the stored id (does not forget the session)
 	assert.equal(view.getSelectedHandle(), null);
 });
 
+// Another computer's pairing (a synced vault used to share one): Orca rejects the token, or can't
+// decrypt the auth frame and closes with 4001. The pane says to re-pair this computer, once.
+const { RemoteRuntimeClientError } = await import("../src/orca-remote/remote-runtime-client-error.ts");
+const { PAIRING_REJECTED_NOTICE } = await import("../src/chat-view.ts");
+const REJECTIONS = [
+	new RemoteRuntimeClientError("unauthorized", "Remote Orca runtime rejected the pairing token.", { pairingStage: "access-grant" }),
+	new RemoteRuntimeClientError("remote_runtime_unavailable", "Remote Orca runtime closed the connection (4001: Unauthorized).", {
+		pairingStage: "host-identity",
+		closeCode: 4001,
+	}),
+];
+
+test("a rejected pairing at open says to re-pair this computer, once, and keeps the stored id", async () => {
+	assert.match(PAIRING_REJECTED_NOTICE, /Pair with Orca/);
+	assert.match(PAIRING_REJECTED_NOTICE, /This computer only/);
+	for (const rejection of REJECTIONS) {
+		const view = makeView();
+		await view.onOpen();
+		view.setCredentialForTest(FAKE_CREDENTIAL);
+		view.setClientForTest({
+			listAllAgentSessionTabs: async () => {
+				throw new OrcaRemoteError(rejection.message, rejection);
+			},
+		});
+		view.setStoredSessionIdForTest("s1");
+		FakeNoticeLog.length = 0;
+		await view.restoreLastSession();
+		assert.deepEqual(FakeNoticeLog, [PAIRING_REJECTED_NOTICE]);
+		const status = () => view.contentEl.querySelector(".orca-chat-status-label")!.textContent;
+		assert.equal(status(), "⚠ Re-pair this computer");
+		// The liveness tick retries quietly and keeps the status.
+		await view.checkCurrentSession();
+		assert.deepEqual(FakeNoticeLog, [PAIRING_REJECTED_NOTICE]);
+		assert.equal(status(), "⚠ Re-pair this computer");
+		assert.equal(view.getStoredSessionIdForTest(), "s1");
+	}
+});
+
+test("Orca down (connection refused, or closed without an auth code) still says it can't reach Orca", async () => {
+	for (const down of [
+		new RemoteRuntimeClientError("remote_runtime_unavailable", "Could not connect to the remote Orca runtime.", { pairingStage: "connect" }),
+		new RemoteRuntimeClientError("remote_runtime_unavailable", "Remote Orca runtime closed the connection.", { pairingStage: "connect", closeCode: 1006 }),
+		new RemoteRuntimeClientError("runtime_timeout", "Timed out waiting for the remote Orca runtime to respond.", { pairingStage: "connect" }),
+	]) {
+		const view = makeView();
+		await view.onOpen();
+		view.setCredentialForTest(FAKE_CREDENTIAL);
+		view.setClientForTest({
+			listAllAgentSessionTabs: async () => {
+				throw new OrcaRemoteError(down.message, down);
+			},
+		});
+		view.setStoredSessionIdForTest("s1");
+		FakeNoticeLog.length = 0;
+		await view.restoreLastSession();
+		assert.deepEqual(FakeNoticeLog, [`Orca Chat: ${down.message}`]);
+		assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "Can't reach Orca");
+	}
+});
+
 async function openWithSession(tabs: () => Promise<unknown[]>) {
 	const view = makeView();
 	await view.onOpen();
@@ -594,6 +654,23 @@ test("New session: a mobile-scope pairing refusal Notices the re-pair hint", asy
 		"Orca Chat needs the \"This computer only\" pairing link — re-pair from Orca's settings.",
 	]);
 	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "⚠ Session not created");
+});
+
+test("New session: a rejected pairing says to re-pair this computer", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const { client } = fakeCreateClient({
+		listRepos: async () => {
+			throw new OrcaRemoteError(REJECTIONS[0].message, REJECTIONS[0]);
+		},
+	});
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.deepEqual(FakeNoticeLog, [PAIRING_REJECTED_NOTICE]);
+	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "⚠ Re-pair this computer");
 });
 
 test("sendToSelected with no session tells the user to click New session", async () => {

@@ -15,6 +15,7 @@ import {
 	storedSessionId,
 } from "./helpers/pane";
 import { computeAgentSessionPayloadFingerprint } from "../src/orca-remote/agent-session-mutation-envelope";
+import { generateKeyPair, publicKeyToBase64 } from "../src/orca-remote/e2ee-crypto";
 
 const NO_SESSION = "No session yet";
 // Stands in for Orca's single-session page so mounted chats reach "● Live chat".
@@ -257,4 +258,37 @@ test("a pairing in data.json from an older version is moved to this device's sto
 	expect(await storedSessionId(obsidian)).toBe(sessionId);
 	expect(readFileSync(dataFile, "utf8")).not.toContain(sessionId);
 	expect(readFileSync(dataFile, "utf8")).not.toContain(server.credential.deviceToken);
+});
+
+// The vault used to sync the pairing, so after the update one computer can hold the pairing (and last
+// session) another computer made with its own Orca. That Orca's key doesn't match this one's.
+test.describe("another computer's pairing", () => {
+	test.use({
+		pairedCredential: async ({ server }, use) => {
+			await use({ ...server.credential, publicKeyB64: publicKeyToBase64(generateKeyPair().publicKey) });
+		},
+		legacyLastSessionId: "session-from-the-other-computer",
+	});
+
+	test("the pane says to re-pair this computer, and New session creates nothing", async ({ server, obsidian, vaultPath }) => {
+		await registerVault(server, vaultPath);
+		const notice = obsidian.locator(".notice", { hasText: "Orca didn't accept this computer's pairing" });
+		await expect(notice).toBeVisible();
+		await expect(notice).toContainText("Pair with Orca");
+		await expect(notice).toContainText("This computer only");
+		await expect(statusLabel(obsidian)).toHaveText("⚠ Re-pair this computer");
+		await expectStatusFits(obsidian);
+		await screenshotWindow(obsidian, "pairing-rejected");
+		// The stored session is kept: it may still be good once this computer is re-paired.
+		expect(await storedSessionId(obsidian)).toBe("session-from-the-other-computer");
+
+		// The Notice sits over the pane's header; clicking it dismisses it.
+		await notice.click();
+		await expect(notice).toHaveCount(0);
+		await newSessionButton(obsidian).click();
+		await expect(notice).toBeVisible();
+		await expect(statusLabel(obsidian)).toHaveText("⚠ Re-pair this computer");
+		expect(server.received("agentSession.create")).toHaveLength(0);
+		await expect(chatWebview(obsidian)).toHaveCount(0);
+	});
 });

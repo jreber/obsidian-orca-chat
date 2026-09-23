@@ -50,7 +50,7 @@ export function installDomExtensions(): void {
 
 export class Notice {
 	readonly message: string;
-	constructor(message: string) {
+	constructor(message: string, _duration?: number) {
 		this.message = message;
 		FakeNoticeLog.push(message);
 	}

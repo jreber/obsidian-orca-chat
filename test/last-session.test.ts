@@ -137,11 +137,14 @@ test("migration: a device's own pairing and session win; data.json's copies are 
 	assert.deepEqual(await plugin.loadData(), {});
 });
 
-test("migration: a synced session id isn't taken by a device that has its own pairing", async () => {
-	const { app, plugin } = pluginWithData({ lastSessionId: "sA" });
-	app.saveLocalStorage(PAIRED_CREDENTIAL_KEY, CRED_B);
+// A device only has a value of its own before its first migration completes if that migration was
+// interrupted after moving some values: the rerun moves the rest.
+test("migration: a rerun after one interrupted after moving the pairing still moves the session", async () => {
+	const { app, plugin } = pluginWithData({ pairedCredential: CRED_A, lastSessionId: "sA" });
+	app.saveLocalStorage(PAIRED_CREDENTIAL_KEY, CRED_A);
 	await migratePluginStorage(plugin as never);
-	assert.equal(await loadLastSessionId(plugin as never), null);
+	assert.deepEqual(await loadPairedCredential(plugin as never), CRED_A);
+	assert.equal(await loadLastSessionId(plugin as never), "sA");
 	assert.deepEqual(await plugin.loadData(), {});
 });
 

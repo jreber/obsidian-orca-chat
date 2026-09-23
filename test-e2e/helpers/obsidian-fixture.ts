@@ -86,10 +86,13 @@ type Fixtures = {
 	// What the plugin is paired with when `paired`: the fake server's credential by default. A spec
 	// pairing with a real Orca overrides this fixture (and then no fake server is started).
 	pairedCredential: PairedCredential;
+	// Option: a last session id seeded into data.json alongside the pairing, as an older version kept it.
+	legacyLastSessionId: string | null;
 };
 
 export const test = base.extend<Fixtures>({
 	paired: [true, { option: true }],
+	legacyLastSessionId: [null, { option: true }],
 
 	server: async ({}, use) => {
 		const server = await FakeOrcaServer.start();
@@ -147,12 +150,15 @@ export const test = base.extend<Fixtures>({
 	// own startup routine (`ke()` in main.js) opens whichever vaults are marked `open: true` in its
 	// vault registry, which is exactly what pre-seeding the config accomplishes, with no vault-picker
 	// screen in between.
-	obsidian: async ({ pairedCredential, vaultDir, paired }, use) => {
+	obsidian: async ({ pairedCredential, vaultDir, paired, legacyLastSessionId }, use) => {
 		const userDataDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-userdata-"));
 		cpSync(FIXTURE_VAULT, vaultDir, { recursive: true });
 		writeFileSync(
 			path.join(vaultDir, ".obsidian", "plugins", "orca-chat", "data.json"),
-			JSON.stringify(paired ? { pairedCredential } : {}),
+			JSON.stringify({
+				...(paired ? { pairedCredential } : {}),
+				...(legacyLastSessionId ? { lastSessionId: legacyLastSessionId } : {}),
+			}),
 		);
 		writeFileSync(
 			path.join(userDataDir, "obsidian.json"),

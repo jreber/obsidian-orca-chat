@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { sendRemoteRuntimeRequest } from "../src/orca-remote/remote-runtime-client.ts";
 import { FakeOrcaServer, agentSessionTab, historyPage, textMessageItem } from "../test-e2e/protocol/fake-orca-server.ts";
-import { buildCreateEnvelope, OrcaRemoteClient } from "../src/orca-remote-client.ts";
+import { buildCreateEnvelope, isPairingRejected, OrcaRemoteClient } from "../src/orca-remote-client.ts";
+import { generateKeyPair, publicKeyToBase64 } from "../src/orca-remote/e2ee-crypto.ts";
 import {
 	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
 	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
@@ -160,4 +161,30 @@ test("agentSession.create is refused without the structured capability, like Orc
 	} finally {
 		await server.stop();
 	}
+});
+
+// A synced vault can hand a computer the pairing another computer made with its own Orca: a device
+// token this Orca doesn't know, or that Orca's key. Either is a rejected pairing; Orca being down isn't.
+test("another computer's pairing is a rejected pairing; Orca not running isn't", async () => {
+	const server = await FakeOrcaServer.start();
+	const credential = server.credential;
+	const listAll = async (credential: typeof server.credential) => {
+		const client = new OrcaRemoteClient();
+		await client.connect(credential);
+		return client.listAllAgentSessionTabs().then(
+			() => "ok",
+			(err: unknown) => err,
+		);
+	};
+	try {
+		assert.equal(await listAll(server.credential), "ok");
+		const otherToken = await listAll({ ...server.credential, deviceToken: "another-computers-token" });
+		assert.ok(isPairingRejected(otherToken), String(otherToken));
+		const otherKey = await listAll({ ...server.credential, publicKeyB64: publicKeyToBase64(generateKeyPair().publicKey) });
+		assert.ok(isPairingRejected(otherKey), String(otherKey));
+	} finally {
+		await server.stop();
+	}
+	const down = await listAll(credential);
+	assert.ok(down instanceof Error && !isPairingRejected(down), String(down));
 });
