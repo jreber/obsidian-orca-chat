@@ -137,7 +137,7 @@ export default class OrcaChatPlugin extends Plugin {
 			}
 		}
 		if (!chatView.getSelectedHandle()) {
-			chatView.focusPicker();
+			chatView.focusNewSessionButton();
 		}
 		return chatView;
 	}

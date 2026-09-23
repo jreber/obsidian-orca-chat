@@ -1,6 +1,6 @@
 // White-box test mirroring the pattern in the (now-removed) chat-view.send-clears-input.test.ts:
 // exercises OrcaChatView's public surface without a live Obsidian runtime, via test/fakes/obsidian.ts.
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 
@@ -12,9 +12,13 @@ Object.assign(globalThis, {
 	Event: dom.window.Event,
 });
 
+// onOpen registers the pane's session-check interval on this jsdom window; closing the window
+// clears its timers so the test process can exit.
+after(() => dom.window.close());
+
 const obsidianFake = await import("./fakes/obsidian.ts");
 obsidianFake.installDomExtensions();
-const { WorkspaceLeaf, App, Plugin } = obsidianFake;
+const { WorkspaceLeaf, App, Plugin, FakeNoticeLog } = obsidianFake;
 const { OrcaChatView, ORCA_CHAT_VIEW_TYPE, interceptObsidianLinks, watchEmbedLoad } = await import(
 	"../src/chat-view.ts"
 );
@@ -29,7 +33,7 @@ test("has the expected view type", () => {
 	assert.equal(view.getViewType(), ORCA_CHAT_VIEW_TYPE);
 });
 
-test("getSelectedHandle returns null with no session picked", () => {
+test("getSelectedHandle returns null with no current session", () => {
 	const view = makeView();
 	assert.equal(view.getSelectedHandle(), null);
 });
@@ -186,4 +190,292 @@ test("watchEmbedLoad re-arms on a new load so a reload can recover", () => {
 	);
 	webview.dispatchEvent(webviewEvent("did-finish-load", {}));
 	assert.deepEqual(outcomes, ["failed: HTTP 503", "loaded"]);
+});
+
+// --- New session button / restore / existence check ---
+
+const FAKE_CREDENTIAL = { v: 2, endpoint: "ws://127.0.0.1:1", deviceToken: "t", publicKeyB64: "k", scope: "runtime" };
+
+test("pane renders the New session button, status label and embed, with no session dropdown", async () => {
+	const view = makeView();
+	await view.onOpen();
+	assert.ok(view.contentEl.querySelector("button.orca-chat-new-session"));
+	assert.ok(view.contentEl.querySelector(".orca-chat-status-label"));
+	assert.ok(view.contentEl.querySelector(".orca-chat-embed"));
+	assert.equal(view.contentEl.querySelector(".orca-chat-session-select"), null);
+	assert.equal(view.contentEl.querySelector("select"), null);
+});
+
+test("no stored session: shows the button state, mounts nothing", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setClientForTest({ listAllAgentSessionTabs: async () => [] });
+	view.setStoredSessionIdForTest(null);
+	await view.restoreLastSession();
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(view.contentEl.querySelector("webview"), null);
+	assert.match(view.contentEl.querySelector(".orca-chat-status-label")!.textContent ?? "", /New session/);
+});
+
+test("stored session still in Orca: reattaches and mounts its webview", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	view.setClientForTest({ listAllAgentSessionTabs: async () => [{ sessionId: "s1", agent: "claude", title: "t" }] });
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(view.getSelectedHandle(), "s1");
+	assert.ok(view.contentEl.querySelector("webview.orca-chat-webview"));
+	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "Connecting…");
+});
+
+test("stored session gone from Orca: clears it and says it ended", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	view.setClientForTest({ listAllAgentSessionTabs: async () => [] });
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(view.getSelectedHandle(), null);
+	assert.ok(FakeNoticeLog.some((m) => /ended/i.test(m)));
+	assert.equal(view.getStoredSessionIdForTest(), null);
+});
+
+test("Orca unreachable at open keeps the stored id (does not forget the session)", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setClientForTest({ listAllAgentSessionTabs: async () => { throw new Error("offline"); } });
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	assert.equal(view.getSelectedHandle(), null);
+});
+
+async function openWithSession(tabs: () => Promise<unknown[]>) {
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	let listAll = async () => [{ sessionId: "s1", agent: "claude", title: "t" }] as unknown[];
+	view.setClientForTest({ listAllAgentSessionTabs: () => listAll() });
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	listAll = tabs;
+	return view;
+}
+
+test("existence check: a vanished session is torn down, cleared and announced", async () => {
+	const view = await openWithSession(async () => []);
+	FakeNoticeLog.length = 0;
+	await view.checkCurrentSession();
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(view.contentEl.querySelector("webview"), null);
+	assert.equal(view.getStoredSessionIdForTest(), null);
+	assert.ok(FakeNoticeLog.some((m) => /session ended/i.test(m)));
+	assert.match(view.contentEl.querySelector(".orca-chat-status-label")!.textContent ?? "", /New session/);
+});
+
+test("existence check: a transient list error leaves the session alone, with no Notice", async () => {
+	const view = await openWithSession(async () => {
+		throw new Error("blip");
+	});
+	FakeNoticeLog.length = 0;
+	await view.checkCurrentSession();
+	assert.equal(view.getSelectedHandle(), "s1");
+	assert.ok(view.contentEl.querySelector("webview.orca-chat-webview"));
+	assert.equal(view.getStoredSessionIdForTest(), "s1");
+	assert.deepEqual(FakeNoticeLog, []);
+});
+
+test("existence check: a still-present session stays mounted", async () => {
+	const view = await openWithSession(async () => [{ sessionId: "s1", agent: "claude", title: "t" }]);
+	await view.checkCurrentSession();
+	assert.equal(view.getSelectedHandle(), "s1");
+	assert.ok(view.contentEl.querySelector("webview.orca-chat-webview"));
+});
+
+function fakeCreateClient(overrides: Record<string, unknown> = {}) {
+	const calls: string[] = [];
+	const client = {
+		listAllAgentSessionTabs: async () => [],
+		listRepos: async () => {
+			calls.push("listRepos");
+			return [{ id: "r1", path: "/vault", displayName: "Vault" }];
+		},
+		addFolderRepo: async () => {
+			calls.push("addFolderRepo");
+			return { id: "r1", path: "/vault", displayName: "Vault" };
+		},
+		listWorkspaces: async () => {
+			calls.push("listWorkspaces");
+			return [{ id: "w1", path: "/vault" }];
+		},
+		createClaudeSession: async () => {
+			calls.push("createClaudeSession");
+			return { sessionId: "new1" };
+		},
+		...overrides,
+	};
+	return { client, calls };
+}
+
+function makeDesktopView() {
+	const app = new App();
+	app.vault.adapter = new obsidianFake.FileSystemAdapter("/vault");
+	return new OrcaChatView(new WorkspaceLeaf(), new Plugin(app));
+}
+
+function clickNewSession(view: InstanceType<typeof OrcaChatView>) {
+	(view.contentEl.querySelector(".orca-chat-new-session") as HTMLButtonElement).click();
+}
+
+test("New session: creates, stores and mounts the new session", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const { client, calls } = fakeCreateClient();
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	await view.onNewSession();
+	assert.deepEqual(calls, ["listRepos", "listWorkspaces", "createClaudeSession"]);
+	assert.equal(view.getSelectedHandle(), "new1");
+	assert.equal(view.getStoredSessionIdForTest(), "new1");
+	assert.ok(view.contentEl.querySelector("webview.orca-chat-webview"));
+});
+
+test("New session: a double click creates only one session", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const { client, calls } = fakeCreateClient();
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	const first = view.onNewSession();
+	const second = view.onNewSession();
+	await Promise.all([first, second]);
+	assert.equal(calls.filter((c) => c === "createClaudeSession").length, 1);
+	assert.equal((view.contentEl.querySelector(".orca-chat-new-session") as HTMLButtonElement).disabled, false);
+});
+
+test("New session: the button click triggers creation", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const { client, calls } = fakeCreateClient();
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	clickNewSession(view);
+	for (let i = 0; i < 20 && view.getSelectedHandle() === null; i++) await new Promise((r) => setTimeout(r, 0));
+	assert.ok(calls.includes("createClaudeSession"));
+	assert.equal(view.getSelectedHandle(), "new1");
+});
+
+test("New session: mobile (no vault root path) Notices and creates nothing", async () => {
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const { client, calls } = fakeCreateClient();
+	view.setClientForTest(client);
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.deepEqual(calls, []);
+	assert.ok(FakeNoticeLog.includes("Orca Chat needs desktop Obsidian"));
+});
+
+test("New session: unpaired Notices and creates nothing", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	const { client, calls } = fakeCreateClient();
+	view.setClientForTest(client);
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.deepEqual(calls, []);
+	assert.ok(FakeNoticeLog.includes("Not paired with Orca — see the Pair with Orca command"));
+});
+
+test("New session: declining the add-project prompt creates nothing and shows no error", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	// Vault not yet an Orca project -> the real AddProjectModal opens; the fake Modal lets us cancel it.
+	const { client, calls } = fakeCreateClient({ listRepos: async () => [] });
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	FakeNoticeLog.length = 0;
+	const originalOpen = obsidianFake.Modal.prototype.open;
+	obsidianFake.Modal.prototype.open = function (this: InstanceType<typeof obsidianFake.Modal>) {
+		originalOpen.call(this);
+		this.close();
+	};
+	try {
+		await view.onNewSession();
+	} finally {
+		obsidianFake.Modal.prototype.open = originalOpen;
+	}
+	assert.deepEqual(calls, []);
+	assert.deepEqual(FakeNoticeLog, []);
+	assert.equal(view.getSelectedHandle(), null);
+	assert.equal(view.getStoredSessionIdForTest(), null);
+	assert.match(view.contentEl.querySelector(".orca-chat-status-label")!.textContent ?? "", /New session/);
+});
+
+test("New session: a failure Notices, shows the warning status and stores nothing", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	const { client } = fakeCreateClient({ listWorkspaces: async () => [] });
+	view.setClientForTest(client);
+	view.setStoredSessionIdForTest(null);
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.ok(FakeNoticeLog.some((m) => /no workspace for this vault/.test(m)));
+	assert.equal(view.contentEl.querySelector(".orca-chat-status-label")!.textContent, "⚠ Couldn't create a session");
+	assert.equal(view.getStoredSessionIdForTest(), null);
+	assert.equal(view.getSelectedHandle(), null);
+});
+
+test("sendToSelected with no session tells the user to click New session", async () => {
+	const view = makeView();
+	await view.onOpen();
+	FakeNoticeLog.length = 0;
+	assert.equal(await view.sendToSelected("hi"), false);
+	assert.ok(FakeNoticeLog.includes("Click New session in the Orca Chat pane first"));
+});
+
+test("sendToSelected targets the current session", async () => {
+	const sent: [string, string][] = [];
+	const view = makeView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	view.setClientForTest({
+		listAllAgentSessionTabs: async () => [{ sessionId: "s1", agent: "claude", title: "t" }],
+		sendAgentSessionMessage: async (id: string, text: string) => {
+			sent.push([id, text]);
+		},
+	});
+	view.setStoredSessionIdForTest("s1");
+	await view.restoreLastSession();
+	assert.equal(await view.sendToSelected("hello"), true);
+	assert.deepEqual(sent, [["s1", "hello"]]);
+});
+
+test("focusNewSessionButton focuses the button", async () => {
+	const view = makeView();
+	await view.onOpen();
+	document.body.appendChild(view.containerEl);
+	try {
+		view.focusNewSessionButton();
+		assert.equal(document.activeElement, view.contentEl.querySelector(".orca-chat-new-session"));
+	} finally {
+		view.containerEl.remove();
+	}
+});
+
+test("New session: paired but Orca unreachable says so and creates nothing", async () => {
+	const view = makeDesktopView();
+	await view.onOpen();
+	view.setCredentialForTest(FAKE_CREDENTIAL);
+	FakeNoticeLog.length = 0;
+	await view.onNewSession();
+	assert.ok(FakeNoticeLog.some((m) => /can't reach Orca/i.test(m)));
+	assert.equal(view.getSelectedHandle(), null);
 });

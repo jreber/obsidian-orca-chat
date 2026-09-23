@@ -1,8 +1,17 @@
 import { shell } from "electron";
-import { DropdownComponent, ItemView, Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { confirmAddVaultProject } from "./add-project-modal";
 import { buildSingleSessionEmbedUrl } from "./embed-url";
-import { loadPairedCredential, OrcaPairingError, type PairedCredential } from "./orca-pairing";
+import { createVaultSession, NewSessionCancelled, NewSessionError, type NewSessionClient } from "./new-session";
+import {
+	loadLastSessionId,
+	loadPairedCredential,
+	OrcaPairingError,
+	saveLastSessionId,
+	type PairedCredential,
+} from "./orca-pairing";
 import { OrcaRemoteClient, OrcaRemoteError, type StructuredSessionTab } from "./orca-remote-client";
+import { getVaultRootPath } from "./vault-path";
 
 export const ORCA_CHAT_VIEW_TYPE = "orca-chat-view";
 
@@ -93,19 +102,27 @@ export function watchEmbedLoad(
 	});
 }
 
-const NO_SESSION_VALUE = "";
+const NO_SESSION_STATUS = "No session — click New session";
+const SESSION_CHECK_INTERVAL_MS = 15_000;
+
+// What the pane needs from the Orca RPC client: session creation (NewSessionClient) plus the
+// liveness list, the out-of-band send, and disconnect. OrcaRemoteClient satisfies it structurally.
+type ChatViewClient = NewSessionClient &
+	Pick<OrcaRemoteClient, "listAllAgentSessionTabs" | "sendAgentSessionMessage" | "disconnect">;
 
 export class OrcaChatView extends ItemView {
-	private dropdown!: DropdownComponent;
+	private newSessionButton!: HTMLButtonElement;
 	private statusLabel!: HTMLSpanElement;
 	private embedContainer!: HTMLDivElement;
 	private currentWebview: HTMLElement | null = null;
-	private entries: StructuredSessionTab[] = [];
+	private currentSessionId: string | null = null;
+	private busy = false;
 
 	private readonly plugin: Plugin;
 	private credential: PairedCredential | null = null;
-	private remoteClient: OrcaRemoteClient | null = null;
-	private hasRemote = false;
+	private remoteClient: ChatViewClient | null = null;
+	// Test seam: when not undefined, replaces plugin data as the stored last-session id.
+	private storedSessionOverride: string | null | undefined = undefined;
 
 	constructor(leaf: WorkspaceLeaf, plugin: Plugin) {
 		super(leaf);
@@ -130,20 +147,21 @@ export class OrcaChatView extends ItemView {
 		container.addClass("orca-chat-view");
 
 		const headerRow = container.createDiv({ cls: "orca-chat-header-row" });
-		this.dropdown = new DropdownComponent(headerRow);
-		this.dropdown.selectEl.addClass("orca-chat-session-select");
-		this.dropdown.selectEl.onfocus = () => void this.populateSessions();
-		this.dropdown.onChange(() => this.updateEmbed());
+		this.newSessionButton = headerRow.createEl("button", {
+			text: "New session",
+			cls: "mod-cta orca-chat-new-session",
+		});
+		this.newSessionButton.onclick = () => void this.onNewSession();
 
 		this.statusLabel = headerRow.createEl("span", { cls: "orca-chat-status-label" });
 
 		this.embedContainer = container.createDiv({ cls: "orca-chat-embed" });
 
-		// Fire-and-forget: see original rationale — the pane must render regardless of whether the
-		// paired remote is reachable yet.
+		// Fire-and-forget: the pane must render regardless of whether the paired remote is
+		// reachable yet.
 		void this.initializeRemote();
 
-		this.registerInterval(window.setInterval(() => void this.populateSessions(), 3000));
+		this.registerInterval(window.setInterval(() => void this.checkCurrentSession(), SESSION_CHECK_INTERVAL_MS));
 	}
 
 	async onClose(): Promise<void> {
@@ -152,46 +170,143 @@ export class OrcaChatView extends ItemView {
 	}
 
 	private async initializeRemote(): Promise<void> {
-		this.credential = await loadPairedCredential(this.plugin).catch((err: unknown) => {
+		const credential = await loadPairedCredential(this.plugin).catch((err: unknown) => {
 			this.reportError(err);
 			return null;
 		});
-		if (this.credential) {
-			this.remoteClient = new OrcaRemoteClient();
+		// Anything injected through the test seams while the credential was loading wins.
+		if (this.remoteClient || this.credential) return;
+		this.credential = credential;
+		if (credential) {
+			const client = new OrcaRemoteClient();
 			try {
-				await this.remoteClient.connect(this.credential);
-				this.hasRemote = true;
+				await client.connect(credential);
+				this.remoteClient = client;
 			} catch (err) {
 				this.reportError(err);
-				this.remoteClient = null;
-				this.hasRemote = false;
 			}
 		}
-		await this.populateSessions();
+		await this.restoreLastSession();
 	}
 
-	// Kept as the "is anything selected" check main.ts's annotate flow relies on.
+	// Public for tests. Reattaches to the vault's last session if Orca still has it.
+	async restoreLastSession(): Promise<void> {
+		const id = await this.readStoredSessionId();
+		if (!id) {
+			this.statusLabel.setText(NO_SESSION_STATUS);
+			return;
+		}
+		if (!this.remoteClient) {
+			// Unpaired or unreachable: keep the stored id so a later open can reattach.
+			this.statusLabel.setText(this.credential ? "Can't reach Orca" : "Not paired with Orca — see the Pair with Orca command");
+			return;
+		}
+		let tabs: StructuredSessionTab[];
+		try {
+			tabs = await this.remoteClient.listAllAgentSessionTabs();
+		} catch (err) {
+			this.reportError(err);
+			this.statusLabel.setText("Can't reach Orca");
+			return; // keep the stored id
+		}
+		// A New session click that finished while the list was in flight takes precedence.
+		if (this.currentSessionId) return;
+		const tab = tabs.find((t) => t.sessionId === id);
+		if (tab) {
+			this.mountSession(id, tab.agent);
+			return;
+		}
+		await this.writeStoredSessionId(null);
+		new Notice("Orca Chat: previous session ended — click New session");
+		this.statusLabel.setText(NO_SESSION_STATUS);
+	}
+
+	// Public for tests (the button's onclick calls it).
+	async onNewSession(): Promise<void> {
+		if (this.busy) return;
+		// plugin.app is the same App as ItemView#app (and is what the test fakes provide).
+		const app = this.plugin.app;
+		const vaultPath = getVaultRootPath(app);
+		if (!vaultPath) {
+			new Notice("Orca Chat needs desktop Obsidian");
+			return;
+		}
+		if (!this.credential) {
+			new Notice("Not paired with Orca — see the Pair with Orca command");
+			return;
+		}
+		const client = this.remoteClient;
+		if (!client) {
+			// Paired, but the connection at open failed.
+			new Notice("Orca Chat: can't reach Orca — is it running? Reopen the pane to retry");
+			return;
+		}
+		this.busy = true;
+		this.newSessionButton.disabled = true;
+		const previousStatus = this.statusLabel.textContent ?? "";
+		this.statusLabel.setText("Creating session…");
+		try {
+			const vaultName = app.vault.getName();
+			const { sessionId } = await createVaultSession({
+				client,
+				vaultPath,
+				vaultName,
+				confirmAddProject: () => confirmAddVaultProject(app, vaultName, vaultPath),
+			});
+			await this.writeStoredSessionId(sessionId);
+			this.mountSession(sessionId, "claude");
+		} catch (err) {
+			if (err instanceof NewSessionCancelled) {
+				this.statusLabel.setText(this.currentSessionId ? previousStatus : NO_SESSION_STATUS);
+			} else {
+				this.reportError(err);
+				this.statusLabel.setText("⚠ Couldn't create a session");
+			}
+		} finally {
+			this.busy = false;
+			this.newSessionButton.disabled = false;
+		}
+	}
+
+	// Public for tests. Detects the current session being closed in Orca. A failed list is treated
+	// as transient (Orca restarting, network blip) and ignored; only a successful list that no
+	// longer contains the session tears it down.
+	async checkCurrentSession(): Promise<void> {
+		const sessionId = this.currentSessionId;
+		if (!sessionId || !this.remoteClient) return;
+		let tabs: StructuredSessionTab[];
+		try {
+			tabs = await this.remoteClient.listAllAgentSessionTabs();
+		} catch {
+			return;
+		}
+		// The user may have created a different session while the list was in flight.
+		if (this.currentSessionId !== sessionId) return;
+		if (tabs.some((t) => t.sessionId === sessionId)) return;
+		this.teardownWebview();
+		this.currentSessionId = null;
+		await this.writeStoredSessionId(null);
+		new Notice("Orca Chat: session ended — click New session");
+		this.statusLabel.setText(NO_SESSION_STATUS);
+	}
+
+	// Kept as the "is anything selected" check main.ts's annotate flow relies on; returns the
+	// current session id.
 	getSelectedHandle(): string | null {
-		return this.dropdown?.getValue() || null;
+		return this.currentSessionId;
 	}
 
-	private getSelectedEntry(): StructuredSessionTab | null {
-		const sessionId = this.getSelectedHandle();
-		if (!sessionId) return null;
-		return this.entries.find((e) => e.sessionId === sessionId) ?? null;
+	focusNewSessionButton(): void {
+		this.newSessionButton?.focus();
 	}
 
-	focusPicker(): void {
-		this.dropdown?.selectEl.focus();
-	}
-
-	// Kept for main.ts's annotate flow (sends "${selection}\n\n${question}" into the currently
-	// selected session) — the embedded webview owns rendering/composing, but this out-of-band
-	// send still goes through the plugin's own RPC client, same as before.
+	// Kept for main.ts's annotate flow (sends "${selection}\n\n${question}" into the current
+	// session) — the embedded webview owns rendering/composing, but this out-of-band send still
+	// goes through the plugin's own RPC client.
 	async sendToSelected(text: string): Promise<boolean> {
-		const entry = this.getSelectedEntry();
-		if (!entry) {
-			new Notice("Pick a session in the Orca Chat pane first");
+		const sessionId = this.currentSessionId;
+		if (!sessionId) {
+			new Notice("Click New session in the Orca Chat pane first");
 			return false;
 		}
 		if (!this.remoteClient) {
@@ -199,7 +314,7 @@ export class OrcaChatView extends ItemView {
 			return false;
 		}
 		try {
-			await this.remoteClient.sendAgentSessionMessage(entry.sessionId, text);
+			await this.remoteClient.sendAgentSessionMessage(sessionId, text);
 			return true;
 		} catch (err) {
 			this.reportError(err);
@@ -207,58 +322,24 @@ export class OrcaChatView extends ItemView {
 		}
 	}
 
-	private async populateSessions(): Promise<void> {
-		const previousSessionId = this.getSelectedHandle();
-
-		let structuredTabs: StructuredSessionTab[] = this.entries;
-		if (this.hasRemote && this.remoteClient) {
-			try {
-				structuredTabs = await this.remoteClient.listAllAgentSessionTabs();
-			} catch (err) {
-				this.reportError(err);
-			}
-		}
-		this.entries = structuredTabs;
-
-		this.dropdown.selectEl.empty();
-		const stillExists = this.entries.some((e) => e.sessionId === previousSessionId);
-		if (!stillExists) {
-			this.dropdown.addOption(NO_SESSION_VALUE, "— pick a session —");
-			if (previousSessionId) new Notice("Orca Chat: previous session ended — pick another");
-		}
-		for (const entry of this.entries) {
-			this.dropdown.addOption(entry.sessionId, `${entry.agent} — ${entry.title}`);
-		}
-		if (stillExists && previousSessionId) this.dropdown.setValue(previousSessionId);
-
-		// dropdown.setValue() above doesn't fire the change event, so re-check embed state
-		// explicitly (handles a session ending / selection resetting to none).
-		this.updateEmbed();
-	}
-
-	// Mounts (or re-mounts) the <webview> for the currently selected session. Always tears down
-	// and recreates rather than reusing/navigating an existing webview — Orca's single-session
-	// entry point has no "switch session" affordance, and recreating is simpler than teaching it
-	// one. A no-op if the selection hasn't actually changed since the last mount.
-	private updateEmbed(): void {
-		const entry = this.getSelectedEntry();
-
-		if (!entry) {
-			this.teardownWebview();
-			this.statusLabel.setText("No session selected");
-			return;
-		}
+	// Mounts the <webview> for a session. Always tears down and recreates rather than
+	// reusing/navigating an existing webview — Orca's single-session entry point has no "switch
+	// session" affordance, and recreating is simpler than teaching it one. A no-op if that session
+	// is already mounted.
+	private mountSession(sessionId: string, agent: string): void {
 		if (!this.credential) {
 			this.teardownWebview();
+			this.currentSessionId = null;
 			this.statusLabel.setText("Not paired with Orca — see the Pair with Orca command");
 			return;
 		}
-		if (this.currentWebview?.dataset.orcaSessionId === entry.sessionId) {
+		if (this.currentWebview?.dataset.orcaSessionId === sessionId) {
+			this.currentSessionId = sessionId;
 			return;
 		}
 
 		this.teardownWebview();
-		const url = buildSingleSessionEmbedUrl(this.credential, entry.sessionId, entry.agent);
+		const url = buildSingleSessionEmbedUrl(this.credential, sessionId, agent);
 		// Electron only honors `<webview partition>` if it's present before the element is attached
 		// to the DOM — set attributes on a detached element first, then append, rather than using
 		// createEl (which attaches immediately).
@@ -267,8 +348,8 @@ export class OrcaChatView extends ItemView {
 		// No `persist:` prefix: this partition is memory-only, so Electron never writes the
 		// pairing token in this URL to disk. A fresh, unique name per mount also guarantees no
 		// state (cookies, storage) survives across session switches or reopens.
-		webview.setAttribute("partition", `orca-embed-${entry.sessionId}-${Date.now()}`);
-		webview.dataset.orcaSessionId = entry.sessionId;
+		webview.setAttribute("partition", `orca-embed-${sessionId}-${Date.now()}`);
+		webview.dataset.orcaSessionId = sessionId;
 		webview.addClass("orca-chat-webview");
 		interceptObsidianLinks(webview);
 		watchEmbedLoad(webview, {
@@ -280,11 +361,12 @@ export class OrcaChatView extends ItemView {
 				this.statusLabel.setText("⚠ Chat failed to load");
 				new Notice(`Orca Chat: couldn't load the chat from Orca — ${reason}`);
 				// The URL carries the pairing token, so log the session and reason only.
-				console.error(`[orca-chat] embed failed to load for session ${entry.sessionId}: ${reason}`);
+				console.error(`[orca-chat] embed failed to load for session ${sessionId}: ${reason}`);
 			},
 		});
 		this.embedContainer.appendChild(webview);
 		this.currentWebview = webview;
+		this.currentSessionId = sessionId;
 		this.statusLabel.setText("Connecting…");
 	}
 
@@ -294,8 +376,35 @@ export class OrcaChatView extends ItemView {
 		this.embedContainer?.empty();
 	}
 
+	private async readStoredSessionId(): Promise<string | null> {
+		if (this.storedSessionOverride !== undefined) return this.storedSessionOverride;
+		return loadLastSessionId(this.plugin);
+	}
+
+	private async writeStoredSessionId(sessionId: string | null): Promise<void> {
+		if (this.storedSessionOverride !== undefined) {
+			this.storedSessionOverride = sessionId;
+			return;
+		}
+		await saveLastSessionId(this.plugin, sessionId);
+	}
+
+	// --- Test seams (unit tests only; not used by the plugin) ---
+	setClientForTest(client: ChatViewClient): void {
+		this.remoteClient = client;
+	}
+	setCredentialForTest(credential: PairedCredential): void {
+		this.credential = credential;
+	}
+	setStoredSessionIdForTest(sessionId: string | null): void {
+		this.storedSessionOverride = sessionId;
+	}
+	getStoredSessionIdForTest(): string | null | undefined {
+		return this.storedSessionOverride;
+	}
+
 	private reportError(err: unknown): void {
-		if (err instanceof OrcaRemoteError || err instanceof OrcaPairingError) {
+		if (err instanceof OrcaRemoteError || err instanceof OrcaPairingError || err instanceof NewSessionError) {
 			new Notice(err.message);
 		} else {
 			new Notice("Orca Chat: unexpected error, see console");

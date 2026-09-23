@@ -13,15 +13,17 @@
 	flex-shrink: 0;
 }
 
-.orca-chat-session-select {
-	flex: 1 1 auto;
-	min-width: 0;
+.orca-chat-new-session {
+	flex: 0 0 auto;
 }
 
 .orca-chat-status-label {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
 }
 
 .orca-chat-embed {
