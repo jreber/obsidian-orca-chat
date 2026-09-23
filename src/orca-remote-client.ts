@@ -1,6 +1,10 @@
 import { computeAgentSessionPayloadFingerprint } from "./orca-remote/agent-session-mutation-envelope";
 import type { PairingOffer } from "./orca-remote/pairing";
-import { STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY, type RuntimeCapability } from "./orca-remote/protocol-version";
+import {
+	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	type RuntimeCapability,
+} from "./orca-remote/protocol-version";
 import {
 	RemoteRuntimeClientError,
 	sendRemoteRuntimeRequest,
@@ -17,8 +21,14 @@ import type { OrcaRepoSummary } from "./vault-project";
 // session-tab-agent-status-projection.ts on the host. Without it, tabs are
 // hidden/placeholder'd and agentSession.* calls are refused with
 // 'structured_agent_session_unsupported'.
-const STRUCTURED_AGENT_SESSION_CAPABILITIES: readonly RuntimeCapability[] = [
+//
+// The Claude capability is required too: for a paired client that lacks it, the host's
+// session.tabs.listAll projection hides every non-Codex agent-session tab. The plugin only creates
+// Claude sessions, so without it the pane's liveness check never saw its own session and tore the
+// live chat down as "session ended" ~15 s after New session.
+export const STRUCTURED_AGENT_SESSION_CAPABILITIES: readonly RuntimeCapability[] = [
 	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
 ];
 
 // The vendored transport (src/orca-remote/*) opens a fresh E2EE WebSocket

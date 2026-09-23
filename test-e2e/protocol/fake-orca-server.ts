@@ -4,6 +4,10 @@ import nacl from "tweetnacl";
 import { generateKeyPair, publicKeyToBase64 } from "../../src/orca-remote/e2ee-crypto";
 import { acceptOrcaConnection, type ServerConnection } from "./e2ee-server-connection";
 import type { PairingOffer } from "../../src/orca-remote/pairing";
+import {
+	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+} from "../../src/orca-remote/protocol-version";
 import type {
 	AgentSessionTab,
 	AgentSessionHistoryPage,
@@ -61,6 +65,21 @@ export function approvalItem(
 
 export function agentSessionTab(sessionId: string, title: string, agent: "claude" | "codex" = "claude"): AgentSessionTab {
 	return { type: "agent-session", id: sessionId, title, sessionId, agent, isActive: true };
+}
+
+// Orca's projectSessionTabAgentStatus for a paired runtime client (session-tab-agent-status-
+// projection.ts): without the structured capability every agent-session tab is hidden; with it, a
+// Claude (any non-Codex) tab is still hidden unless the Claude capability is advertised too. A fake
+// that skipped this let the plugin ship without the Claude capability — every Claude chat then
+// vanished from its own liveness check against a real Orca.
+export function visibleSessionTabs(tabs: AgentSessionTab[], clientCapabilities: readonly string[]): AgentSessionTab[] {
+	const structured = clientCapabilities.includes(STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY);
+	const claude = clientCapabilities.includes(CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY);
+	return tabs.filter((tab) => {
+		if (tab.type !== "agent-session") return true;
+		if (!structured) return false;
+		return tab.agent === "codex" || claude;
+	});
 }
 
 function minimalSubmission(clientMessageId: string) {
@@ -236,7 +255,7 @@ export class FakeOrcaServer {
 
 		switch (method) {
 			case "session.tabs.listAll":
-				reply({ snapshots: [{ worktree: "", tabs: this.tabs }] });
+				reply({ snapshots: [{ worktree: "", tabs: visibleSessionTabs(this.tabs, conn.clientCapabilities) }] });
 				return;
 			case "repo.list":
 				reply({ repos: this.repos });

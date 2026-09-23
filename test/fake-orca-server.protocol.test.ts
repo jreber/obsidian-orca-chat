@@ -3,6 +3,27 @@ import assert from "node:assert/strict";
 import { sendRemoteRuntimeRequest } from "../src/orca-remote/remote-runtime-client.ts";
 import { FakeOrcaServer, agentSessionTab, historyPage, textMessageItem } from "../test-e2e/protocol/fake-orca-server.ts";
 import { OrcaRemoteClient } from "../src/orca-remote-client.ts";
+import {
+	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	type RuntimeCapability,
+} from "../src/orca-remote/protocol-version.ts";
+
+type TabsResult = { snapshots: { worktree: string; tabs: { sessionId?: string }[] }[] };
+
+async function listAllWith(server: FakeOrcaServer, capabilities: readonly RuntimeCapability[]): Promise<string[]> {
+	const response = await sendRemoteRuntimeRequest<TabsResult>(
+		server.credential,
+		"session.tabs.listAll",
+		null,
+		5000,
+		undefined,
+		undefined,
+		capabilities,
+	);
+	if (!response.ok) throw new Error(response.error.message);
+	return response.result.snapshots.flatMap((s) => s.tabs.map((t) => String(t.sessionId)));
+}
 
 test("session.tabs.listAll returns the tabs configured on the fake server", async () => {
 	const server = await FakeOrcaServer.start();
@@ -14,9 +35,32 @@ test("session.tabs.listAll returns the tabs configured on the fake server", asyn
 			"session.tabs.listAll",
 			null,
 			5000,
+			undefined,
+			undefined,
+			[STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY, CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY],
 		);
 		if (!response.ok) throw new Error(response.error.message);
 		assert.deepEqual(response.result.snapshots[0].tabs, [tab]);
+	} finally {
+		await server.stop();
+	}
+});
+
+// Mirrors Orca's projectSessionTabAgentStatus for a paired runtime client: no structured capability
+// hides every agent-session tab; the structured capability alone shows only Codex tabs; Claude tabs
+// also need the Claude capability.
+test("session.tabs.listAll hides agent-session tabs the client didn't advertise support for", async () => {
+	const server = await FakeOrcaServer.start();
+	try {
+		server.setSessionTabs([agentSessionTab("claude-1", "C", "claude"), agentSessionTab("codex-1", "X", "codex")]);
+		assert.deepEqual(await listAllWith(server, []), []);
+		assert.deepEqual(await listAllWith(server, [STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY]), ["codex-1"]);
+		assert.deepEqual(
+			await listAllWith(server, [STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY, CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY]),
+			["claude-1", "codex-1"],
+		);
+		// The Claude capability means nothing without the base one.
+		assert.deepEqual(await listAllWith(server, [CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY]), []);
 	} finally {
 		await server.stop();
 	}

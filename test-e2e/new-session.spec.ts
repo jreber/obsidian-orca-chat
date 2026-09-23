@@ -128,6 +128,27 @@ test("reopening the pane reattaches to the stored session without creating anoth
 	expect(await storedSessionId(obsidian)).toBe(sessionId);
 });
 
+// The regression a real Orca found: its session.tabs.listAll hides Claude tabs from a client that
+// doesn't advertise the Claude capability (the fake mirrors that), so the first 15 s check tore down
+// every chat the plugin had just created. A live session must survive a full check cycle.
+test("a new Claude session is still live after the periodic check has run", async ({ server, obsidian, vaultPath }) => {
+	test.setTimeout(90_000);
+	server.setEmbedPage(EMBED_PAGE);
+	await startNewSession(obsidian, server, vaultPath);
+	const sessionId = createCalls(server)[0].envelope.sessionId;
+	await expect(statusLabel(obsidian)).toHaveText("● Live chat");
+	const listsBefore = server.received("session.tabs.listAll").length;
+
+	// The pane checks every 15 s; wait until a check has been answered, plus margin for it to act.
+	await expect.poll(() => server.received("session.tabs.listAll").length, { timeout: 25_000 }).toBeGreaterThan(listsBefore);
+	await obsidian.waitForTimeout(2_000);
+
+	await expect(statusLabel(obsidian)).toHaveText("● Live chat");
+	await expect(chatWebview(obsidian)).toHaveAttribute("data-orca-session-id", sessionId);
+	await expect(obsidian.locator(".notice", { hasText: "session ended" })).toHaveCount(0);
+	expect(await storedSessionId(obsidian)).toBe(sessionId);
+});
+
 test("a session closed in Orca is torn down by the periodic check", async ({ server, obsidian, vaultPath }) => {
 	test.setTimeout(90_000);
 	server.setEmbedPage(EMBED_PAGE);

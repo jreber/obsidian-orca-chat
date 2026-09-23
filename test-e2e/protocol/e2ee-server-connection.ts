@@ -4,6 +4,9 @@ import { deriveSharedKey, encrypt, decrypt, publicKeyFromBase64 } from "../../sr
 
 export interface ServerConnection {
 	deviceToken: string;
+	// What the client advertised in its e2ee_auth frame; the real host gates session.tabs.* and
+	// agentSession.* on these per connection.
+	clientCapabilities: readonly string[];
 	sendEncrypted(payload: unknown): void;
 }
 
@@ -38,6 +41,7 @@ export function acceptOrcaConnection(
 			const key = sharedKey;
 			conn = {
 				deviceToken: String(frame.deviceToken ?? ""),
+				clientCapabilities: Array.isArray(frame.clientCapabilities) ? frame.clientCapabilities.map(String) : [],
 				sendEncrypted: (payload) => ws.send(encrypt(JSON.stringify(payload), key)),
 			};
 			conn.sendEncrypted({ type: "e2ee_authenticated" });
