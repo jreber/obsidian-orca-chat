@@ -20,12 +20,14 @@ import {
 } from "./orca-pairing";
 import { OrcaRemoteClient, OrcaRemoteError, type StructuredSessionTab } from "./orca-remote-client";
 import { getVaultRootPath } from "./vault-path";
+import { interceptWikilinks } from "./wikilinks";
 
 export const ORCA_CHAT_VIEW_TYPE = "orca-chat-view";
 
-// The single-session embed's chat transcript cites vault files as real obsidian://open links
-// (see annotate-location.ts's buildObsidianOpenUri) so they're both clickable and demonstrate the
-// link format to the agent in-context.
+// Clicks on obsidian:// links inside the embed are handed to the OS (which routes them back to
+// Obsidian). Note: Orca's chat renderer currently strips unknown link schemes, so obsidian:// links in
+// rendered chat markdown arrive with an empty href and never reach this; the agent's vault links
+// work as [[wikilinks]] instead (see wikilinks.ts). This stays for any page that does render them.
 //
 // A target="_blank" click on an *unregistered custom scheme* never reaches Electron's webview
 // "new-window"/popup machinery — verified empirically, Chromium silently drops the attempt before
@@ -474,6 +476,8 @@ export class OrcaChatView extends ItemView {
 		webview.dataset.orcaSessionId = sessionId;
 		webview.addClass("orca-chat-webview");
 		interceptObsidianLinks(webview);
+		// [[wikilinks]] in the agent's replies (see wikilinks.ts): opened in the main area, never here.
+		interceptWikilinks(webview, this.plugin.app, this.leaf);
 		watchEmbedLoad(webview, {
 			onLoaded: () => {
 				if (this.currentWebview !== webview) return;
