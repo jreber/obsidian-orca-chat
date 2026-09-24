@@ -1,14 +1,34 @@
 import { shell } from "electron";
-import { DropdownComponent, ItemView, Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, Plugin, type Workspace, WorkspaceLeaf } from "obsidian";
+import { confirmAddVaultProject } from "./add-project-modal";
+import { appendAgentsAdvice } from "./agents-advice";
 import { buildSingleSessionEmbedUrl } from "./embed-url";
-import { loadPairedCredential, OrcaPairingError, type PairedCredential } from "./orca-pairing";
-import { OrcaRemoteClient, OrcaRemoteError, type StructuredSessionTab } from "./orca-remote-client";
+import {
+	createVaultSession,
+	NewSessionCancelled,
+	NewSessionError,
+	newSessionFailureMessage,
+	type NewSessionClient,
+} from "./new-session";
+import {
+	compareAndSaveLastSessionId,
+	loadLastSessionId,
+	loadPairedCredential,
+	OrcaPairingError,
+	saveLastSessionId,
+	saveLastSessionIdIf,
+	type PairedCredential,
+} from "./orca-pairing";
+import { isPairingRejected, OrcaRemoteClient, OrcaRemoteError, type StructuredSessionTab } from "./orca-remote-client";
+import { getVaultRootPath } from "./vault-path";
+import { interceptWikilinks } from "./wikilinks";
 
 export const ORCA_CHAT_VIEW_TYPE = "orca-chat-view";
 
-// The single-session embed's chat transcript cites vault files as real obsidian://open links
-// (see annotate-location.ts's buildObsidianOpenUri) so they're both clickable and demonstrate the
-// link format to the agent in-context.
+// Clicks on obsidian:// links inside the embed are handed to the OS (which routes them back to
+// Obsidian). Note: Orca's chat renderer currently strips unknown link schemes, so obsidian:// links in
+// rendered chat markdown arrive with an empty href and never reach this; the agent's vault links
+// work as [[wikilinks]] instead (see wikilinks.ts). This stays for any page that does render them.
 //
 // A target="_blank" click on an *unregistered custom scheme* never reaches Electron's webview
 // "new-window"/popup machinery — verified empirically, Chromium silently drops the attempt before
@@ -38,32 +58,151 @@ function obsidianLinkInterceptorScript(marker: string): string {
 	})();`;
 }
 
+const MAX_OBSIDIAN_LINK_LENGTH = 4096;
+
+// The guest's report is untrusted: any frame or script in the guest page can console.log the marker,
+// and shell.openExternal hands whatever it gets to the OS (file:, smb:, custom protocol handlers). So
+// only an obsidian://open link naming this vault is passed on; anything else returns null.
+export function acceptedObsidianLink(message: string, vaultName: string): string | null {
+	if (!message.startsWith(OBSIDIAN_LINK_CONSOLE_MARKER)) return null;
+	const link = message.slice(OBSIDIAN_LINK_CONSOLE_MARKER.length);
+	if (link.length > MAX_OBSIDIAN_LINK_LENGTH || /[\u0000-\u001f\u007f\s]/.test(link)) return null;
+	// Matched as a string rather than with new URL(): how Chromium parses the host of a non-special
+	// scheme has changed between versions.
+	const prefix = "obsidian://open?";
+	if (!link.startsWith(prefix)) return null;
+	// A fragment (a heading) may not hold '&' or '=': whether the handler treats '#' as the end of the
+	// query or not, it can't add a parameter to the ones checked here.
+	const [query, ...fragment] = link.slice(prefix.length).split("#");
+	if (/[&=]/.test(fragment.join("#"))) return null;
+	const params = new URLSearchParams(query);
+	const vaults = params.getAll("vault");
+	// `path` opens an absolute path, whichever vault it is in.
+	if (vaults.length !== 1 || vaults[0] !== vaultName || params.has("path")) return null;
+	return link;
+}
+
 export function interceptObsidianLinks(
 	webview: HTMLElement & { executeJavaScript?: (code: string) => Promise<unknown> },
+	vaultName: string,
 ): void {
 	webview.addEventListener("dom-ready", () => {
-		void webview.executeJavaScript?.(obsidianLinkInterceptorScript(OBSIDIAN_LINK_CONSOLE_MARKER));
+		// Rejects if the guest navigates or the webview goes away mid-injection; nothing to do then.
+		void webview.executeJavaScript?.(obsidianLinkInterceptorScript(OBSIDIAN_LINK_CONSOLE_MARKER))?.catch(() => {});
 	});
 	webview.addEventListener("console-message", ((event: Event) => {
 		const message = (event as unknown as { message?: unknown }).message;
 		if (typeof message !== "string" || !message.startsWith(OBSIDIAN_LINK_CONSOLE_MARKER)) return;
-		void shell.openExternal(message.slice(OBSIDIAN_LINK_CONSOLE_MARKER.length));
+		const link = acceptedObsidianLink(message, vaultName);
+		if (!link) {
+			console.warn("[orca-chat] ignored a link from the chat page that isn't an obsidian://open link to this vault");
+			return;
+		}
+		void shell.openExternal(link);
 	}) as EventListener);
 }
 
-const NO_SESSION_VALUE = "";
+// Chromium's "navigation aborted" code: a superseded or cancelled load, not a failure.
+const ERR_ABORTED = -3;
+
+// A <webview> whose page 404s still fires did-finish-load (Chromium renders the error body), so
+// did-fail-load alone can't tell a missing page from a working one; the main frame's HTTP status
+// from did-frame-navigate covers that case. Reports at most once per load; did-start-loading re-arms.
+export function watchEmbedLoad(
+	webview: HTMLElement,
+	handlers: { onLoaded: () => void; onFailed: (reason: string) => void },
+): void {
+	let failed = false;
+	const fail = (reason: string) => {
+		if (failed) return;
+		failed = true;
+		handlers.onFailed(reason);
+	};
+	webview.addEventListener("did-start-loading", () => {
+		failed = false;
+	});
+	webview.addEventListener("did-frame-navigate", ((event: Event) => {
+		const { isMainFrame, httpResponseCode, httpStatusText } = event as unknown as {
+			isMainFrame?: boolean;
+			httpResponseCode?: number;
+			httpStatusText?: string;
+		};
+		if (!isMainFrame || typeof httpResponseCode !== "number" || httpResponseCode < 400) return;
+		fail(`HTTP ${httpResponseCode}${httpStatusText ? ` ${httpStatusText}` : ""}`);
+	}) as EventListener);
+	webview.addEventListener("did-fail-load", ((event: Event) => {
+		const { isMainFrame, errorCode, errorDescription } = event as unknown as {
+			isMainFrame?: boolean;
+			errorCode?: number;
+			errorDescription?: string;
+		};
+		if (!isMainFrame || errorCode === ERR_ABORTED) return;
+		fail(`${errorDescription || "load failed"} (${errorCode})`);
+	}) as EventListener);
+	webview.addEventListener("did-finish-load", () => {
+		if (!failed) handlers.onLoaded();
+	});
+}
+
+// After a (re-)pair: has every open Orca Chat pane re-read the pairing. Every pane is tried even if
+// one fails; then rejects with the first failure so the caller can say the refresh didn't complete.
+export async function reloadChatViewCredentials(workspace: Pick<Workspace, "getLeavesOfType">): Promise<void> {
+	const views = workspace
+		.getLeavesOfType(ORCA_CHAT_VIEW_TYPE)
+		.map((leaf) => leaf.view)
+		.filter((view): view is OrcaChatView => view instanceof OrcaChatView);
+	const results = await Promise.allSettled(views.map((view) => view.reloadCredential()));
+	const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
+	if (failed) throw failed.reason;
+}
+
+// Status texts stay short: the label ellipsizes past ~25 characters at the default sidebar width.
+const NO_SESSION_STATUS = "No session yet";
+const NOT_PAIRED_STATUS = "Not paired with Orca";
+const PAIRING_REJECTED_STATUS = "⚠ Re-pair this computer";
+// Earlier versions synced the pairing with the vault, so after an update a computer can hold the
+// pairing another computer made with its own Orca.
+export const PAIRING_REJECTED_NOTICE =
+	"Orca Chat: Orca didn't accept this computer's pairing. It may be another computer's (pairings used to sync with the vault). " +
+	"Run Pair with Orca on this computer, using a \"This computer only\" link from this computer's Orca.";
+const SESSION_CHECK_INTERVAL_MS = 15_000;
+export const ADVICE_BUTTON_TOOLTIP =
+	"Adds (or updates) a block in the vault's AGENTS.md telling the chat's agent to be brief and to link notes as [[wikilinks]]. Text outside the block is left alone.";
+
+// What the pane needs from the Orca RPC client: session creation (NewSessionClient) plus the
+// liveness list, the out-of-band send, and disconnect. OrcaRemoteClient satisfies it structurally.
+type ChatViewClient = NewSessionClient &
+	Pick<OrcaRemoteClient, "listAllAgentSessionTabs" | "sendAgentSessionMessage" | "disconnect">;
 
 export class OrcaChatView extends ItemView {
-	private dropdown!: DropdownComponent;
+	private newSessionButton!: HTMLButtonElement;
+	private adviceButton!: HTMLButtonElement;
 	private statusLabel!: HTMLSpanElement;
 	private embedContainer!: HTMLDivElement;
 	private currentWebview: HTMLElement | null = null;
-	private entries: StructuredSessionTab[] = [];
+	// Stops the mounted webview's wikilink re-checks on vault changes (see wikilinks.ts).
+	private stopWikilinkRechecks: (() => void) | null = null;
+	private currentSessionId: string | null = null;
+	// Load state of currentWebview, so a status can be derived from it (see currentStatus).
+	private embedLoadState: "loading" | "loaded" | "failed" = "loading";
+	private busy = false;
+	// Bumped when the pane's session state is replaced out from under in-flight async work: a New
+	// session committing, or the pane closing. Restores, existence checks and creates capture it
+	// when they start and drop their results (mount, stored-id write, Notice) if it has changed.
+	private generation = 0;
+	// Stored-id writes are serialized (saveLastSessionId is a read-modify-write) and each is dropped
+	// if its generation went stale while it waited, so a late clear can't overwrite a newer id.
+	private storedIdWrites: Promise<void> = Promise.resolve();
+	// The last restore couldn't reach Orca, so whether the stored session is still live is unknown.
+	// The liveness tick and the next New session click try the restore again; cleared once a restore
+	// gets an answer or a session is mounted.
+	private restorePending = false;
 
 	private readonly plugin: Plugin;
 	private credential: PairedCredential | null = null;
-	private remoteClient: OrcaRemoteClient | null = null;
-	private hasRemote = false;
+	private remoteClient: ChatViewClient | null = null;
+	// Test seam: when not undefined, replaces plugin data as the stored last-session id.
+	private storedSessionOverride: string | null | undefined = undefined;
 
 	constructor(leaf: WorkspaceLeaf, plugin: Plugin) {
 		super(leaf);
@@ -88,68 +227,282 @@ export class OrcaChatView extends ItemView {
 		container.addClass("orca-chat-view");
 
 		const headerRow = container.createDiv({ cls: "orca-chat-header-row" });
-		this.dropdown = new DropdownComponent(headerRow);
-		this.dropdown.selectEl.addClass("orca-chat-session-select");
-		this.dropdown.selectEl.onfocus = () => void this.populateSessions();
-		this.dropdown.onChange(() => this.updateEmbed());
+		this.newSessionButton = headerRow.createEl("button", {
+			text: "New session",
+			cls: "mod-cta orca-chat-new-session",
+		});
+		this.newSessionButton.onclick = () => void this.onNewSession();
+
+		// A one-off setup action, so a plain (secondary) button; New session is the pane's one CTA.
+		this.adviceButton = headerRow.createEl("button", {
+			text: "Append AGENTS.md advice",
+			cls: "orca-chat-agents-advice",
+			attr: { title: ADVICE_BUTTON_TOOLTIP },
+		});
+		this.adviceButton.onclick = () => void this.onAppendAgentsAdvice();
 
 		this.statusLabel = headerRow.createEl("span", { cls: "orca-chat-status-label" });
 
 		this.embedContainer = container.createDiv({ cls: "orca-chat-embed" });
 
-		// Fire-and-forget: see original rationale — the pane must render regardless of whether the
-		// paired remote is reachable yet.
+		// Fire-and-forget: the pane must render regardless of whether the paired remote is
+		// reachable yet.
 		void this.initializeRemote();
 
-		this.registerInterval(window.setInterval(() => void this.populateSessions(), 3000));
+		this.registerInterval(window.setInterval(() => void this.checkCurrentSession(), SESSION_CHECK_INTERVAL_MS));
 	}
 
 	async onClose(): Promise<void> {
+		this.forgetConnection();
+	}
+
+	// Re-reads the pairing and starts over as a reopened pane would (after Pair with Orca, so a
+	// re-pair takes effect without reopening the pane).
+	async reloadCredential(): Promise<void> {
+		this.forgetConnection();
+		this.statusLabel.setText("");
+		await this.initializeRemote();
+	}
+
+	// Drops the session, client and credential; in-flight work sees the generation change.
+	private forgetConnection(): void {
+		this.generation++;
 		this.teardownWebview();
 		this.remoteClient?.disconnect();
+		this.remoteClient = null;
+		this.credential = null;
+		this.currentSessionId = null;
+		this.restorePending = false;
 	}
 
 	private async initializeRemote(): Promise<void> {
-		this.credential = await loadPairedCredential(this.plugin).catch((err: unknown) => {
+		const gen = this.generation;
+		const credential = await loadPairedCredential(this.plugin).catch((err: unknown) => {
 			this.reportError(err);
 			return null;
 		});
-		if (this.credential) {
-			this.remoteClient = new OrcaRemoteClient();
+		if (gen !== this.generation) return;
+		this.credential = credential;
+		if (credential) {
+			const client = new OrcaRemoteClient();
 			try {
-				await this.remoteClient.connect(this.credential);
-				this.hasRemote = true;
+				await client.connect(credential);
+				if (gen !== this.generation) {
+					client.disconnect();
+					return;
+				}
+				this.remoteClient = client;
 			} catch (err) {
+				if (gen !== this.generation) return;
 				this.reportError(err);
-				this.remoteClient = null;
-				this.hasRemote = false;
 			}
 		}
-		await this.populateSessions();
+		await this.restoreLastSession();
 	}
 
-	// Kept as the "is anything selected" check main.ts's annotate flow relies on.
+	// Public for tests. Reattaches to the vault's last session if Orca still has it. A retry (the
+	// liveness tick, or a New session click) doesn't repeat the "can't reach Orca" Notice; nor is
+	// "previous session ended" announced while a New session is underway. `forNewSession` marks the
+	// click's own restore-first retry: any other restore that answers while a New session is running
+	// stands down (no mount, no stored-id clear) — the click decides, and its create would otherwise
+	// replace the reattached session a moment later and lose track of it.
+	async restoreLastSession(retry = false, forNewSession = false): Promise<void> {
+		const gen = this.generation;
+		const id = await this.readStoredSessionId();
+		if (gen !== this.generation) return;
+		if (!id) {
+			this.restorePending = false;
+			if (!this.currentSessionId) this.statusLabel.setText(NO_SESSION_STATUS);
+			return;
+		}
+		if (!this.remoteClient) {
+			// Unpaired or unreachable: keep the stored id so a later open can reattach.
+			this.statusLabel.setText(this.credential ? "Can't reach Orca" : NOT_PAIRED_STATUS);
+			return;
+		}
+		let tabs: StructuredSessionTab[];
+		try {
+			tabs = await this.remoteClient.listAllAgentSessionTabs();
+		} catch (err) {
+			if (gen !== this.generation || this.currentSessionId) return;
+			// Keep the stored id, and try again later.
+			this.restorePending = true;
+			// A running New session owns the status and reports its own errors.
+			if (this.busy && !forNewSession) return;
+			if (!retry) this.reportError(err, (message) => `Orca Chat: ${message}`);
+			this.statusLabel.setText(isPairingRejected(err) ? PAIRING_REJECTED_STATUS : "Can't reach Orca");
+			return;
+		}
+		// A New session that finished (or the pane closing) while the list was in flight wins.
+		if (gen !== this.generation || this.currentSessionId) return;
+		// A New session is running and this isn't its own restore: leave restorePending as it is, so
+		// a create that fails still has the stored session retried later.
+		if (this.busy && !forNewSession) return;
+		this.restorePending = false;
+		const tab = tabs.find((t) => t.sessionId === id);
+		if (tab) {
+			this.mountSession(id, tab.agent);
+			return;
+		}
+		await this.clearStoredSessionIdIf(id, gen);
+		if (gen !== this.generation || this.currentSessionId) return;
+		if (!this.busy) new Notice("Orca Chat: previous session ended — click New session");
+		this.statusLabel.setText(NO_SESSION_STATUS);
+	}
+
+	// Public for tests (the button's onclick calls it).
+	async onNewSession(): Promise<void> {
+		if (this.busy) return;
+		// plugin.app is the same App as ItemView#app (and is what the test fakes provide).
+		const app = this.plugin.app;
+		const vaultPath = getVaultRootPath(app);
+		if (!vaultPath) {
+			new Notice("Orca Chat needs desktop Obsidian");
+			return;
+		}
+		if (!this.credential) {
+			new Notice("Not paired with Orca — see the Pair with Orca command");
+			return;
+		}
+		const client = this.remoteClient;
+		if (!client) {
+			// Paired but no client: only while the pane is still initializing (connect can't fail).
+			new Notice("Orca Chat: can't reach Orca — is it running?");
+			return;
+		}
+		this.busy = true;
+		this.newSessionButton.disabled = true;
+		// The generation this click's results belong to; advanced when the new session commits.
+		let gen = this.generation;
+		try {
+			// Orca was unreachable when the pane last tried to reattach: if the stored session turns
+			// out to be live, reattach it rather than create another and lose track of it.
+			if (this.restorePending) {
+				await this.restoreLastSession(true, true);
+				if (gen !== this.generation) return;
+				if (this.currentSessionId) {
+					new Notice("Orca Chat: reattached your previous session");
+					return;
+				}
+			}
+			// The stored id at click time: a session created after the pane closed is kept only if
+			// nothing newer has been stored since.
+			const storedAtClick = await this.readStoredSessionId();
+			const vaultName = app.vault.getName();
+			const { sessionId } = await createVaultSession({
+				client,
+				vaultPath,
+				vaultName,
+				confirmAddProject: () => confirmAddVaultProject(app, vaultName, vaultPath),
+				onCreating: () => {
+					if (gen === this.generation) this.statusLabel.setText("Creating session…");
+				},
+			});
+			if (gen !== this.generation) {
+				// The pane closed meanwhile.
+				await this.storeOrphanedSessionId(sessionId, storedAtClick);
+				return;
+			}
+			gen = ++this.generation;
+			let written: boolean;
+			try {
+				written = await this.writeStoredSessionId(sessionId, gen);
+			} catch (err) {
+				// Orca has the chat; only remembering it across a restart failed. Show it anyway.
+				console.error("[orca-chat] couldn't store the new session id", err);
+				if (gen !== this.generation) return;
+				this.mountSession(sessionId, "claude");
+				new Notice("Orca Chat: chat created, but this pane couldn't remember it after a restart");
+				return;
+			}
+			if (gen !== this.generation) {
+				if (!written) await this.storeOrphanedSessionId(sessionId, storedAtClick);
+				return;
+			}
+			this.mountSession(sessionId, "claude");
+		} catch (err) {
+			if (gen !== this.generation) return;
+			if (err instanceof NewSessionCancelled) {
+				this.statusLabel.setText(this.currentStatus());
+			} else {
+				this.reportError(err, newSessionFailureMessage);
+				this.statusLabel.setText(isPairingRejected(err) ? PAIRING_REJECTED_STATUS : "⚠ Session not created");
+			}
+		} finally {
+			this.busy = false;
+			this.newSessionButton.disabled = false;
+		}
+	}
+
+	// Writes the plugin's advice for the chat's agent into AGENTS.md at the vault root (the session's
+	// working folder); see agents-advice.ts.
+	// Public for tests (the button's onclick calls it).
+	async onAppendAgentsAdvice(): Promise<void> {
+		const app = this.plugin.app;
+		if (!getVaultRootPath(app)) {
+			new Notice("Orca Chat needs desktop Obsidian");
+			return;
+		}
+		if (this.adviceButton.disabled) return;
+		this.adviceButton.disabled = true;
+		try {
+			new Notice(await appendAgentsAdvice(app.vault));
+		} catch (err) {
+			new Notice(`Orca Chat: couldn't update AGENTS.md — ${err instanceof Error ? err.message : "see console"}`);
+			console.error("[orca-chat] couldn't update AGENTS.md", err);
+		} finally {
+			this.adviceButton.disabled = false;
+		}
+	}
+
+	// Public for tests. Detects the current session being closed in Orca. A failed list is treated
+	// as transient (Orca restarting, network blip) and ignored; only a successful list that no
+	// longer contains the session tears it down.
+	async checkCurrentSession(): Promise<void> {
+		const gen = this.generation;
+		const sessionId = this.currentSessionId;
+		if (!this.remoteClient) return;
+		if (!sessionId) {
+			// Nothing mounted: retry a restore that couldn't reach Orca (not while a New session runs,
+			// which retries it itself).
+			if (this.restorePending && !this.busy) await this.restoreLastSession(true);
+			return;
+		}
+		let tabs: StructuredSessionTab[];
+		try {
+			tabs = await this.remoteClient.listAllAgentSessionTabs();
+		} catch {
+			return;
+		}
+		// The user may have created a different session (or closed the pane) while the list was
+		// in flight.
+		if (gen !== this.generation || this.currentSessionId !== sessionId) return;
+		if (tabs.some((t) => t.sessionId === sessionId)) return;
+		this.teardownWebview();
+		this.currentSessionId = null;
+		await this.clearStoredSessionIdIf(sessionId, gen);
+		if (gen !== this.generation) return;
+		new Notice("Orca Chat: session ended — click New session");
+		this.statusLabel.setText(NO_SESSION_STATUS);
+	}
+
+	// Kept as the "is anything selected" check main.ts's annotate flow relies on; returns the
+	// current session id.
 	getSelectedHandle(): string | null {
-		return this.dropdown?.getValue() || null;
+		return this.currentSessionId;
 	}
 
-	private getSelectedEntry(): StructuredSessionTab | null {
-		const sessionId = this.getSelectedHandle();
-		if (!sessionId) return null;
-		return this.entries.find((e) => e.sessionId === sessionId) ?? null;
+	focusNewSessionButton(): void {
+		this.newSessionButton?.focus();
 	}
 
-	focusPicker(): void {
-		this.dropdown?.selectEl.focus();
-	}
-
-	// Kept for main.ts's annotate flow (sends "${selection}\n\n${question}" into the currently
-	// selected session) — the embedded webview owns rendering/composing, but this out-of-band
-	// send still goes through the plugin's own RPC client, same as before.
+	// Kept for main.ts's annotate flow (sends "${selection}\n\n${question}" into the current
+	// session) — the embedded webview owns rendering/composing, but this out-of-band send still
+	// goes through the plugin's own RPC client.
 	async sendToSelected(text: string): Promise<boolean> {
-		const entry = this.getSelectedEntry();
-		if (!entry) {
-			new Notice("Pick a session in the Orca Chat pane first");
+		const sessionId = this.currentSessionId;
+		if (!sessionId) {
+			new Notice("Click New session in the Orca Chat pane first");
 			return false;
 		}
 		if (!this.remoteClient) {
@@ -157,7 +510,7 @@ export class OrcaChatView extends ItemView {
 			return false;
 		}
 		try {
-			await this.remoteClient.sendAgentSessionMessage(entry.sessionId, text);
+			await this.remoteClient.sendAgentSessionMessage(sessionId, text);
 			return true;
 		} catch (err) {
 			this.reportError(err);
@@ -165,58 +518,24 @@ export class OrcaChatView extends ItemView {
 		}
 	}
 
-	private async populateSessions(): Promise<void> {
-		const previousSessionId = this.getSelectedHandle();
-
-		let structuredTabs: StructuredSessionTab[] = this.entries;
-		if (this.hasRemote && this.remoteClient) {
-			try {
-				structuredTabs = await this.remoteClient.listAllAgentSessionTabs();
-			} catch (err) {
-				this.reportError(err);
-			}
-		}
-		this.entries = structuredTabs;
-
-		this.dropdown.selectEl.empty();
-		const stillExists = this.entries.some((e) => e.sessionId === previousSessionId);
-		if (!stillExists) {
-			this.dropdown.addOption(NO_SESSION_VALUE, "— pick a session —");
-			if (previousSessionId) new Notice("Orca Chat: previous session ended — pick another");
-		}
-		for (const entry of this.entries) {
-			this.dropdown.addOption(entry.sessionId, `${entry.agent} — ${entry.title}`);
-		}
-		if (stillExists && previousSessionId) this.dropdown.setValue(previousSessionId);
-
-		// dropdown.setValue() above doesn't fire the change event, so re-check embed state
-		// explicitly (handles a session ending / selection resetting to none).
-		this.updateEmbed();
-	}
-
-	// Mounts (or re-mounts) the <webview> for the currently selected session. Always tears down
-	// and recreates rather than reusing/navigating an existing webview — Orca's single-session
-	// entry point has no "switch session" affordance, and recreating is simpler than teaching it
-	// one. A no-op if the selection hasn't actually changed since the last mount.
-	private updateEmbed(): void {
-		const entry = this.getSelectedEntry();
-
-		if (!entry) {
-			this.teardownWebview();
-			this.statusLabel.setText("No session selected");
-			return;
-		}
+	// Mounts the <webview> for a session. Always tears down and recreates rather than
+	// reusing/navigating an existing webview — Orca's single-session entry point has no "switch
+	// session" affordance, and recreating is simpler than teaching it one. A no-op if that session
+	// is already mounted.
+	private mountSession(sessionId: string, agent: string): void {
 		if (!this.credential) {
 			this.teardownWebview();
-			this.statusLabel.setText("Not paired with Orca — see the Pair with Orca command");
+			this.currentSessionId = null;
+			this.statusLabel.setText(NOT_PAIRED_STATUS);
 			return;
 		}
-		if (this.currentWebview?.dataset.orcaSessionId === entry.sessionId) {
+		if (this.currentWebview?.dataset.orcaSessionId === sessionId) {
+			this.currentSessionId = sessionId;
 			return;
 		}
 
 		this.teardownWebview();
-		const url = buildSingleSessionEmbedUrl(this.credential, entry.sessionId, entry.agent);
+		const url = buildSingleSessionEmbedUrl(this.credential, sessionId, agent);
 		// Electron only honors `<webview partition>` if it's present before the element is attached
 		// to the DOM — set attributes on a detached element first, then append, rather than using
 		// createEl (which attaches immediately).
@@ -225,24 +544,133 @@ export class OrcaChatView extends ItemView {
 		// No `persist:` prefix: this partition is memory-only, so Electron never writes the
 		// pairing token in this URL to disk. A fresh, unique name per mount also guarantees no
 		// state (cookies, storage) survives across session switches or reopens.
-		webview.setAttribute("partition", `orca-embed-${entry.sessionId}-${Date.now()}`);
-		webview.dataset.orcaSessionId = entry.sessionId;
+		webview.setAttribute("partition", `orca-embed-${sessionId}-${Date.now()}`);
+		webview.dataset.orcaSessionId = sessionId;
 		webview.addClass("orca-chat-webview");
-		interceptObsidianLinks(webview);
+		interceptObsidianLinks(webview, this.plugin.app.vault.getName());
+		// [[wikilinks]] in the agent's replies (see wikilinks.ts): opened in the main area, never here.
+		this.stopWikilinkRechecks = interceptWikilinks(webview, this.plugin.app, this.leaf);
+		watchEmbedLoad(webview, {
+			onLoaded: () => {
+				if (this.currentWebview !== webview) return;
+				this.embedLoadState = "loaded";
+				this.statusLabel.setText(this.currentStatus());
+			},
+			onFailed: (reason) => {
+				if (this.currentWebview !== webview) return;
+				this.embedLoadState = "failed";
+				this.statusLabel.setText(this.currentStatus());
+				new Notice(`Orca Chat: couldn't load the chat from Orca — ${reason}`);
+				// The URL carries the pairing token, so log the session and reason only.
+				console.error(`[orca-chat] embed failed to load for session ${sessionId}: ${reason}`);
+			},
+		});
 		this.embedContainer.appendChild(webview);
 		this.currentWebview = webview;
-		this.statusLabel.setText("● Live chat");
+		this.currentSessionId = sessionId;
+		this.restorePending = false;
+		this.embedLoadState = "loading";
+		this.statusLabel.setText(this.currentStatus());
+	}
+
+	// The status for what is mounted right now.
+	private currentStatus(): string {
+		if (!this.currentWebview) return NO_SESSION_STATUS;
+		if (this.embedLoadState === "loaded") return "● Live chat";
+		if (this.embedLoadState === "failed") return "⚠ Chat failed to load";
+		return "Connecting…";
 	}
 
 	private teardownWebview(): void {
+		this.stopWikilinkRechecks?.();
+		this.stopWikilinkRechecks = null;
 		this.currentWebview?.remove();
 		this.currentWebview = null;
 		this.embedContainer?.empty();
 	}
 
-	private reportError(err: unknown): void {
-		if (err instanceof OrcaRemoteError || err instanceof OrcaPairingError) {
-			new Notice(err.message);
+	private async readStoredSessionId(): Promise<string | null> {
+		if (this.storedSessionOverride !== undefined) return this.storedSessionOverride;
+		return loadLastSessionId(this.plugin);
+	}
+
+	// Queued behind earlier writes; skipped if `gen` is no longer current when its turn comes.
+	// Resolves to whether it wrote.
+	private writeStoredSessionId(sessionId: string | null, gen: number): Promise<boolean> {
+		const write = this.storedIdWrites.then(async () => {
+			if (gen !== this.generation) return false;
+			if (this.storedSessionOverride !== undefined) {
+				this.storedSessionOverride = sessionId;
+				return true;
+			}
+			await saveLastSessionId(this.plugin, sessionId);
+			return true;
+		});
+		this.storedIdWrites = write.then(() => {}, () => {});
+		return write;
+	}
+
+	// Clears the stored id only if it is still `deadId`, the one found gone: an id stored since (say,
+	// a session a closed pane created late) is newer and stays. Queued like writeStoredSessionId.
+	private clearStoredSessionIdIf(deadId: string, gen: number): Promise<boolean> {
+		const write = this.storedIdWrites.then(async () => {
+			if (gen !== this.generation) return false;
+			if (this.storedSessionOverride !== undefined) {
+				if (this.storedSessionOverride !== deadId) return false;
+				this.storedSessionOverride = null;
+				return true;
+			}
+			return compareAndSaveLastSessionId(this.plugin, deadId, null);
+		});
+		this.storedIdWrites = write.then(() => {}, () => {});
+		return write;
+	}
+
+	// A session created after the pane closed exists in Orca but no pane shows it (a reopened pane is
+	// a new view). Store it for the next open to restore if the stored id is still the one at click
+	// time (`expected`) or was cleared since; a different id stored since is a newer session and
+	// wins. Never mounts or Notices.
+	private storeOrphanedSessionId(sessionId: string, expected: string | null): Promise<void> {
+		const accept = (stored: string | null) => stored === expected || stored === null;
+		const write = this.storedIdWrites.then(async () => {
+			if (this.storedSessionOverride !== undefined) {
+				if (accept(this.storedSessionOverride)) this.storedSessionOverride = sessionId;
+				return;
+			}
+			try {
+				await saveLastSessionIdIf(this.plugin, accept, sessionId);
+			} catch (err) {
+				console.error("[orca-chat] couldn't keep a session created after the pane closed", err);
+			}
+		});
+		this.storedIdWrites = write.catch(() => {});
+		return write;
+	}
+
+	// --- Test seams (unit tests only; not used by the plugin) ---
+	// Injecting a client or credential supersedes the pane's own initializeRemote (still loading
+	// the real credential in the background), exactly as closing the pane would.
+	setClientForTest(client: ChatViewClient): void {
+		this.generation++;
+		this.remoteClient = client;
+	}
+	setCredentialForTest(credential: PairedCredential): void {
+		this.generation++;
+		this.credential = credential;
+	}
+	setStoredSessionIdForTest(sessionId: string | null): void {
+		this.storedSessionOverride = sessionId;
+	}
+	getStoredSessionIdForTest(): string | null | undefined {
+		return this.storedSessionOverride;
+	}
+
+	private reportError(err: unknown, describe: (message: string) => string = (message) => message): void {
+		if (isPairingRejected(err)) {
+			// Longer than the default few seconds: it says what to do.
+			new Notice(PAIRING_REJECTED_NOTICE, 15_000);
+		} else if (err instanceof OrcaRemoteError || err instanceof OrcaPairingError || err instanceof NewSessionError) {
+			new Notice(describe(err.message));
 		} else {
 			new Notice("Orca Chat: unexpected error, see console");
 			console.error(err);

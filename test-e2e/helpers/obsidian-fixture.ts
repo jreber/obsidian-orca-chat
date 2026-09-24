@@ -1,19 +1,124 @@
 import { chromium, type Browser, type Page } from "playwright";
 import { test as base } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { FakeOrcaServer } from "../protocol/fake-orca-server";
+import type { PairedCredential } from "../../src/orca-pairing";
 
 const FIXTURE_VAULT = path.resolve(import.meta.dirname, "../fixture-vault");
-const OBSIDIAN_BINARY = "/Applications/Obsidian.app/Contents/MacOS/Obsidian";
+const FLATPAK_APP_ID = "md.obsidian.Obsidian";
 
-export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
+type ObsidianLauncher = { command: string; args: string[]; flatpak: boolean };
+
+// OBSIDIAN_BINARY overrides the executable; OBSIDIAN_BINARY_ARGS (space-separated) is prepended to
+// Obsidian's own args, e.g. OBSIDIAN_BINARY=flatpak OBSIDIAN_BINARY_ARGS="run md.obsidian.Obsidian".
+function resolveObsidianLauncher(): ObsidianLauncher {
+	const override = process.env.OBSIDIAN_BINARY;
+	if (override) {
+		const args = (process.env.OBSIDIAN_BINARY_ARGS ?? "").split(" ").filter(Boolean);
+		return { command: override, args, flatpak: path.basename(override) === "flatpak" };
+	}
+	if (process.platform === "darwin") {
+		return { command: "/Applications/Obsidian.app/Contents/MacOS/Obsidian", args: [], flatpak: false };
+	}
+	if (process.platform === "win32") {
+		const localAppData = process.env.LOCALAPPDATA ?? path.join(homedir(), "AppData", "Local");
+		return { command: path.join(localAppData, "Programs", "Obsidian", "Obsidian.exe"), args: [], flatpak: false };
+	}
+	// Looked up rather than probed: running Obsidian to check it exists would open a window.
+	const onPath = (process.env.PATH ?? "")
+		.split(path.delimiter)
+		.map((dir) => path.join(dir, "obsidian"))
+		.find((candidate) => existsSync(candidate));
+	if (onPath) {
+		return { command: onPath, args: [], flatpak: false };
+	}
+	if (spawnSync("flatpak", ["info", FLATPAK_APP_ID], { stdio: "ignore" }).status === 0) {
+		return { command: "flatpak", args: ["run", FLATPAK_APP_ID], flatpak: true };
+	}
+	throw new Error("Obsidian not found: install it (flatpak, AppImage on PATH as `obsidian`) or set OBSIDIAN_BINARY");
+}
+
+const LAUNCHER = resolveObsidianLauncher();
+
+// Flatpak apps get a private /tmp, so a vault under the host's tmpdir() is invisible to the sandboxed
+// Obsidian; its default permissions do include the home directory.
+function e2eTempRoot(): string {
+	if (!LAUNCHER.flatpak) return tmpdir();
+	const root = path.join(homedir(), ".cache", "orca-chat-e2e");
+	mkdirSync(root, { recursive: true });
+	return root;
+}
+
+// `flatpak run` execs bwrap, which does not forward SIGTERM into the sandbox, so killing the child
+// leaves Obsidian running. Stop exactly the instance whose bwrap pid is our child — never
+// `flatpak kill <app id>`, which would also take down the user's own Obsidian.
+async function killOwnFlatpakInstance(child: ChildProcess): Promise<void> {
+	if (!LAUNCHER.flatpak || child.pid === undefined) return;
+	const ownInstance = () =>
+		execFileSync("flatpak", ["ps", "--columns=instance,pid"], { encoding: "utf8" })
+			.split("\n")
+			.map((line) => line.trim().split(/\s+/))
+			.find(([instance, pid]) => instance && pid === String(child.pid))?.[0];
+	const instance = ownInstance();
+	if (!instance) return;
+	spawnSync("flatpak", ["kill", instance], { stdio: "ignore" });
+	// `flatpak kill` returns before the sandbox exits; removing the vault while it still runs races.
+	for (let attempt = 0; attempt < 20 && ownInstance(); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+}
+
+type Fixtures = {
+	server: FakeOrcaServer;
+	obsidian: Page;
+	// The temp vault copy's directory on the host.
+	vaultDir: string;
+	// The vault root exactly as Obsidian reports it (FileSystemAdapter#getBasePath) — the value the
+	// plugin sends to repo.add and matches repo.list against. Register repos on the fake with this.
+	vaultPath: string;
+	// Option: false launches unpaired. When true, the credential is seeded where an older version
+	// kept it, the plugin's data.json: a fresh --user-data-dir has empty local storage, and the
+	// plugin's one-time migration moves it into this device's storage on load.
+	paired: boolean;
+	// What the plugin is paired with when `paired`: the fake server's credential by default. A spec
+	// pairing with a real Orca overrides this fixture (and then no fake server is started).
+	pairedCredential: PairedCredential;
+	// Option: a last session id seeded into data.json alongside the pairing, as an older version kept it.
+	legacyLastSessionId: string | null;
+};
+
+export const test = base.extend<Fixtures>({
+	paired: [true, { option: true }],
+	legacyLastSessionId: [null, { option: true }],
+
 	server: async ({}, use) => {
 		const server = await FakeOrcaServer.start();
 		await use(server);
 		await server.stop();
+	},
+
+	pairedCredential: async ({ server }, use) => {
+		await use(server.credential);
+	},
+
+	vaultDir: async ({}, use) => {
+		const vaultDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-vault-"));
+		try {
+			await use(vaultDir);
+		} finally {
+			rmSync(vaultDir, { recursive: true, force: true });
+		}
+	},
+
+	vaultPath: async ({ obsidian }, use) => {
+		const basePath = await obsidian.evaluate(() => {
+			const win = window as unknown as { app: { vault: { adapter: { getBasePath: () => string } } } };
+			return win.app.vault.adapter.getBasePath();
+		});
+		await use(basePath);
 	},
 
 	// Fresh vault copy + fresh Electron --user-data-dir per test: avoids colliding with the real,
@@ -45,13 +150,15 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 	// own startup routine (`ke()` in main.js) opens whichever vaults are marked `open: true` in its
 	// vault registry, which is exactly what pre-seeding the config accomplishes, with no vault-picker
 	// screen in between.
-	obsidian: async ({ server }, use) => {
-		const vaultDir = mkdtempSync(path.join(tmpdir(), "orca-chat-e2e-vault-"));
-		const userDataDir = mkdtempSync(path.join(tmpdir(), "orca-chat-e2e-userdata-"));
+	obsidian: async ({ pairedCredential, vaultDir, paired, legacyLastSessionId }, use) => {
+		const userDataDir = mkdtempSync(path.join(e2eTempRoot(), "orca-chat-e2e-userdata-"));
 		cpSync(FIXTURE_VAULT, vaultDir, { recursive: true });
 		writeFileSync(
 			path.join(vaultDir, ".obsidian", "plugins", "orca-chat", "data.json"),
-			JSON.stringify({ pairedCredential: server.credential }),
+			JSON.stringify({
+				...(paired ? { pairedCredential } : {}),
+				...(legacyLastSessionId ? { lastSessionId: legacyLastSessionId } : {}),
+			}),
 		);
 		writeFileSync(
 			path.join(userDataDir, "obsidian.json"),
@@ -65,8 +172,8 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 		let browser: Browser | undefined;
 		try {
 			child = spawn(
-				OBSIDIAN_BINARY,
-				[`--remote-debugging-port=0`, `--user-data-dir=${userDataDir}`],
+				LAUNCHER.command,
+				[...LAUNCHER.args, `--remote-debugging-port=0`, `--user-data-dir=${userDataDir}`],
 				{ stdio: ["ignore", "pipe", "pipe"] },
 			);
 
@@ -85,21 +192,39 @@ export const test = base.extend<{ server: FakeOrcaServer; obsidian: Page }>({
 
 			browser = await chromium.connectOverCDP(wsEndpoint);
 			const page = await waitForFirstPage(browser);
-			await dismissFirstRunPrompts(page);
+			const trusted = await dismissFirstRunPrompts(page);
 			await page.waitForFunction(() => "app" in window);
+			// After "Trust author", Obsidian opens Settings in a second window, sometimes seconds later:
+			// wait for it (briefly) so it is closed here rather than in the middle of the test.
+			if (trusted) {
+				const secondWindow = async () => browser!.contexts().flatMap((ctx) => ctx.pages()).length > 1;
+				for (let waited = 0; waited < 8_000 && !(await secondWindow()); waited += 250) {
+					await new Promise((resolve) => setTimeout(resolve, 250));
+				}
+			}
+			await closeStrayWindows(browser, page);
+			// First-run Settings can also open later, after the check above; it then takes focus, and
+			// modals and Notices open in it instead. Close any Obsidian window that appears during the
+			// test. CDP lists the chat's <webview> guest as a page too; it has no `app` and is left alone.
+			for (const context of browser.contexts()) {
+				context.on("page", (stray) => void closeLateObsidianWindow(page, stray));
+			}
 			await page.evaluate(() => {
 				const win = window as unknown as { app: { commands: { executeCommandById: (id: string) => void } } };
 				win.app.commands.executeCommandById("orca-chat:open-orca-chat");
 			});
-			await page.waitForSelector(".orca-chat-session-select");
+			await page.waitForSelector(".orca-chat-new-session");
+			// The pane sets its status once the credential has loaded and any stored session was
+			// checked; clicking New session before that would see "not paired".
+			await page.waitForFunction(() => (document.querySelector(".orca-chat-status-label")?.textContent ?? "") !== "");
 			await use(page);
 		} finally {
 			await browser?.close().catch(() => {});
 			if (child) {
+				await killOwnFlatpakInstance(child);
 				child.kill();
 				await waitForChildExit(child, 5_000);
 			}
-			rmSync(vaultDir, { recursive: true, force: true });
 			rmSync(userDataDir, { recursive: true, force: true });
 		}
 	},
@@ -155,11 +280,48 @@ async function waitForFirstPage(browser: Browser): Promise<Page> {
 // Uses waitFor (polls/retries) rather than isVisible (a single immediate, non-waiting check) — the
 // modal renders asynchronously a beat after the renderer page itself is reachable over CDP, so a bare
 // isVisible() check here was observed to fire before the dialog existed and skip the click entirely.
-async function dismissFirstRunPrompts(page: Page): Promise<void> {
+// Resolves to whether it clicked "Trust author".
+async function dismissFirstRunPrompts(page: Page): Promise<boolean> {
 	const trustButton = page.getByRole("button", { name: /trust author/i });
 	await trustButton.waitFor({ state: "visible", timeout: 8000 }).catch(() => {});
 	if (await trustButton.isVisible().catch(() => false)) {
 		await trustButton.click();
+		return true;
+	}
+	return false;
+}
+
+// On a fresh --user-data-dir, Obsidian (seen on 1.13) can open its Settings in a second, focused
+// window during first run. Obsidian renders Notices into `activeDocument` — the focused window — so
+// while that window lives, every Notice lands there instead of the main window under test.
+async function closeStrayWindows(browser: Browser, mainPage: Page): Promise<void> {
+	for (const page of browser.contexts().flatMap((ctx) => ctx.pages())) {
+		if (page !== mainPage) await page.close().catch(() => {});
+	}
+	// A single bringToFront can lose to the window manager while the closed window's focus is still
+	// being handed back (seen as an occasional 10 s timeout), so re-request focus until it sticks.
+	const deadline = Date.now() + 15_000;
+	for (;;) {
+		await mainPage.bringToFront();
+		const focused = await mainPage
+			.waitForFunction(() => (window as unknown as { activeDocument?: Document }).activeDocument === document, undefined, {
+				timeout: 1_000,
+			})
+			.then(() => true, () => false);
+		if (focused) return;
+		if (Date.now() > deadline) throw new Error("Obsidian's main window never took focus after closing stray windows");
+	}
+}
+
+async function closeLateObsidianWindow(mainPage: Page, stray: Page): Promise<void> {
+	if (stray === mainPage) return;
+	try {
+		await stray.waitForFunction(() => "app" in window || location.protocol.startsWith("http"), undefined, { timeout: 10_000 });
+		if (!(await stray.evaluate(() => "app" in window))) return;
+		await stray.close();
+		await mainPage.bringToFront();
+	} catch {
+		// Gone already, or not an Obsidian window.
 	}
 }
 

@@ -50,7 +50,7 @@ export function installDomExtensions(): void {
 
 export class Notice {
 	readonly message: string;
-	constructor(message: string) {
+	constructor(message: string, _duration?: number) {
 		this.message = message;
 		FakeNoticeLog.push(message);
 	}
@@ -90,8 +90,60 @@ export class View extends Component {
 
 export class ItemView extends View {}
 
+export class FileSystemAdapter {
+	constructor(private base: string) {}
+	getBasePath() {
+		return this.base;
+	}
+}
+
+// Obsidian's Events: on() returns a ref that offref() removes; trigger() is how tests fire them.
+export class Events {
+	private handlers: { name: string; callback: (...args: unknown[]) => unknown }[] = [];
+	on(name: string, callback: (...args: unknown[]) => unknown): object {
+		const ref = { name, callback };
+		this.handlers.push(ref);
+		return ref;
+	}
+	offref(ref: object): void {
+		this.handlers = this.handlers.filter((h) => h !== ref);
+	}
+	trigger(name: string, ...args: unknown[]): void {
+		for (const h of [...this.handlers]) if (h.name === name) h.callback(...args);
+	}
+	listenerCount(): number {
+		return this.handlers.length;
+	}
+}
+
+class FakeVault extends Events {
+	adapter: unknown = {};
+	getName(): string {
+		return "Vault";
+	}
+}
+
+class FakeMetadataCache extends Events {
+	getFirstLinkpathDest(_linkpath: string, _source: string): unknown {
+		return null;
+	}
+}
+
 export class App {
 	workspace: Record<string, unknown> = {};
+	vault = new FakeVault() as FakeVault & Record<string, unknown>;
+	metadataCache = new FakeMetadataCache();
+	// Obsidian's per-device, per-vault local storage: values are stored as JSON, and null clears.
+	localStore = new Map<string, string>();
+	loadLocalStorage(key: string): unknown {
+		const raw = this.localStore.get(key);
+		return raw === undefined ? null : JSON.parse(raw);
+	}
+	saveLocalStorage(key: string, data: unknown): unknown {
+		if (data === null || data === undefined) this.localStore.delete(key);
+		else this.localStore.set(key, JSON.stringify(data));
+		return undefined;
+	}
 }
 
 export class TFile {

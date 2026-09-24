@@ -2,7 +2,29 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { sendRemoteRuntimeRequest } from "../src/orca-remote/remote-runtime-client.ts";
 import { FakeOrcaServer, agentSessionTab, historyPage, textMessageItem } from "../test-e2e/protocol/fake-orca-server.ts";
-import { OrcaRemoteClient } from "../src/orca-remote-client.ts";
+import { buildCreateEnvelope, isPairingRejected, OrcaRemoteClient } from "../src/orca-remote-client.ts";
+import { generateKeyPair, publicKeyToBase64 } from "../src/orca-remote/e2ee-crypto.ts";
+import {
+	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	type RuntimeCapability,
+} from "../src/orca-remote/protocol-version.ts";
+
+type TabsResult = { snapshots: { worktree: string; tabs: { sessionId?: string }[] }[] };
+
+async function listAllWith(server: FakeOrcaServer, capabilities: readonly RuntimeCapability[]): Promise<string[]> {
+	const response = await sendRemoteRuntimeRequest<TabsResult>(
+		server.credential,
+		"session.tabs.listAll",
+		null,
+		5000,
+		undefined,
+		undefined,
+		capabilities,
+	);
+	if (!response.ok) throw new Error(response.error.message);
+	return response.result.snapshots.flatMap((s) => s.tabs.map((t) => String(t.sessionId)));
+}
 
 test("session.tabs.listAll returns the tabs configured on the fake server", async () => {
 	const server = await FakeOrcaServer.start();
@@ -14,9 +36,32 @@ test("session.tabs.listAll returns the tabs configured on the fake server", asyn
 			"session.tabs.listAll",
 			null,
 			5000,
+			undefined,
+			undefined,
+			[STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY, CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY],
 		);
 		if (!response.ok) throw new Error(response.error.message);
 		assert.deepEqual(response.result.snapshots[0].tabs, [tab]);
+	} finally {
+		await server.stop();
+	}
+});
+
+// Mirrors Orca's projectSessionTabAgentStatus for a paired runtime client: no structured capability
+// hides every agent-session tab; the structured capability alone shows only Codex tabs; Claude tabs
+// also need the Claude capability.
+test("session.tabs.listAll hides agent-session tabs the client didn't advertise support for", async () => {
+	const server = await FakeOrcaServer.start();
+	try {
+		server.setSessionTabs([agentSessionTab("claude-1", "C", "claude"), agentSessionTab("codex-1", "X", "codex")]);
+		assert.deepEqual(await listAllWith(server, []), []);
+		assert.deepEqual(await listAllWith(server, [STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY]), ["codex-1"]);
+		assert.deepEqual(
+			await listAllWith(server, [STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY, CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY]),
+			["claude-1", "codex-1"],
+		);
+		// The Claude capability means nothing without the base one.
+		assert.deepEqual(await listAllWith(server, [CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY]), []);
 	} finally {
 		await server.stop();
 	}
@@ -92,4 +137,54 @@ test("pushHistoryEvent delivers a batch to an open subscription", async () => {
 	} finally {
 		await server.stop();
 	}
+});
+
+// Real Orca's agentSession.create calls requireStructuredCapability first: a client that didn't
+// advertise agent-session.structured.v1 gets the RPC error structured_agent_session_unsupported.
+test("agentSession.create is refused without the structured capability, like Orca", async () => {
+	const server = await FakeOrcaServer.start();
+	try {
+		const params = { envelope: buildCreateEnvelope("sess-x", "id:ws-1", "claude"), worktree: "id:ws-1", agent: "claude" };
+		const bare = await sendRemoteRuntimeRequest(server.credential, "agentSession.create", params, 5000);
+		assert.equal(bare.ok, false);
+		if (!bare.ok) assert.equal(bare.error.code, "structured_agent_session_unsupported");
+		const capable = await sendRemoteRuntimeRequest(
+			server.credential,
+			"agentSession.create",
+			params,
+			5000,
+			undefined,
+			undefined,
+			[STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY],
+		);
+		assert.equal(capable.ok, true);
+	} finally {
+		await server.stop();
+	}
+});
+
+// A synced vault can hand a computer the pairing another computer made with its own Orca: a device
+// token this Orca doesn't know, or that Orca's key. Either is a rejected pairing; Orca being down isn't.
+test("another computer's pairing is a rejected pairing; Orca not running isn't", async () => {
+	const server = await FakeOrcaServer.start();
+	const credential = server.credential;
+	const listAll = async (credential: typeof server.credential) => {
+		const client = new OrcaRemoteClient();
+		await client.connect(credential);
+		return client.listAllAgentSessionTabs().then(
+			() => "ok",
+			(err: unknown) => err,
+		);
+	};
+	try {
+		assert.equal(await listAll(server.credential), "ok");
+		const otherToken = await listAll({ ...server.credential, deviceToken: "another-computers-token" });
+		assert.ok(isPairingRejected(otherToken), String(otherToken));
+		const otherKey = await listAll({ ...server.credential, publicKeyB64: publicKeyToBase64(generateKeyPair().publicKey) });
+		assert.ok(isPairingRejected(otherKey), String(otherKey));
+	} finally {
+		await server.stop();
+	}
+	const down = await listAll(credential);
+	assert.ok(down instanceof Error && !isPairingRejected(down), String(down));
 });

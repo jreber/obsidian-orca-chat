@@ -6,6 +6,7 @@
 
 .orca-chat-header-row {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 8px;
 	padding: 6px 8px;
@@ -13,15 +14,19 @@
 	flex-shrink: 0;
 }
 
-.orca-chat-session-select {
-	flex: 1 1 auto;
-	min-width: 0;
+.orca-chat-new-session,
+.orca-chat-agents-advice {
+	flex: 0 0 auto;
+	white-space: nowrap;
 }
 
 .orca-chat-status-label {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
 }
 
 .orca-chat-embed {
@@ -35,4 +40,11 @@
 	width: 100%;
 	height: 100%;
 	border: none;
+}
+
+.orca-chat-version {
+	margin-top: 12px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	user-select: text;
 }

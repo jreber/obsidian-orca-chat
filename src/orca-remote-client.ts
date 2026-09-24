@@ -1,6 +1,10 @@
 import { computeAgentSessionPayloadFingerprint } from "./orca-remote/agent-session-mutation-envelope";
 import type { PairingOffer } from "./orca-remote/pairing";
-import { STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY, type RuntimeCapability } from "./orca-remote/protocol-version";
+import {
+	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	type RuntimeCapability,
+} from "./orca-remote/protocol-version";
 import {
 	RemoteRuntimeClientError,
 	sendRemoteRuntimeRequest,
@@ -9,6 +13,7 @@ import {
 } from "./orca-remote/remote-runtime-client";
 import type { RuntimeRpcResponse } from "./orca-remote/runtime-rpc-envelope";
 import type { PairedCredential } from "./orca-pairing";
+import type { OrcaRepoSummary } from "./vault-project";
 
 // Every agentSession.* method (and the session.tabs.* projection of an
 // agent-session tab) is gated on this capability — see
@@ -16,8 +21,14 @@ import type { PairedCredential } from "./orca-pairing";
 // session-tab-agent-status-projection.ts on the host. Without it, tabs are
 // hidden/placeholder'd and agentSession.* calls are refused with
 // 'structured_agent_session_unsupported'.
-const STRUCTURED_AGENT_SESSION_CAPABILITIES: readonly RuntimeCapability[] = [
+//
+// The Claude capability is required too: for a paired client that lacks it, the host's
+// session.tabs.listAll projection hides every non-Codex agent-session tab. The plugin only creates
+// Claude sessions, so without it the pane's liveness check never saw its own session and tore the
+// live chat down as "session ended" ~15 s after New session.
+export const STRUCTURED_AGENT_SESSION_CAPABILITIES: readonly RuntimeCapability[] = [
 	STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
+	CLAUDE_STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY,
 ];
 
 // The vendored transport (src/orca-remote/*) opens a fresh E2EE WebSocket
@@ -28,6 +39,9 @@ const STRUCTURED_AGENT_SESSION_CAPABILITIES: readonly RuntimeCapability[] = [
 // connect()/disconnect() here are a thin credential holder plus bookkeeping
 // to close any live subscriptions, not a real socket lifecycle.
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+// agentSession.create may install and start Orca's session host, prepare and commit: a cold first
+// create can take well over the read timeout.
+const CREATE_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_SUBSCRIBE_START_TIMEOUT_MS = 10_000;
 
 export class OrcaRemoteError extends Error {
@@ -51,6 +65,20 @@ function toOrcaRemoteError(err: unknown): OrcaRemoteError {
 		return new OrcaRemoteError(err.message, err);
 	}
 	return new OrcaRemoteError("Unknown Orca remote error", err);
+}
+
+// Orca turned the pairing itself away, as opposed to being unreachable: it answers a device token it
+// doesn't know with `unauthorized`, and closes with 4001 when it can't decrypt the auth frame (the
+// pairing holds another Orca's key) or the handshake is otherwise refused. A malformed handshake
+// reply counts too: whatever answers at the pairing's address isn't the Orca that made it.
+export function isPairingRejected(err: unknown): boolean {
+	const cause = err instanceof OrcaRemoteError ? err.cause : err;
+	if (!(cause instanceof RemoteRuntimeClientError)) return false;
+	return (
+		cause.code === "unauthorized" ||
+		cause.closeCode === 4001 ||
+		(cause.code === "invalid_runtime_response" && cause.pairingStage === "host-identity")
+	);
 }
 
 function unwrapResponse<T>(response: RuntimeRpcResponse<T>): T {
@@ -512,9 +540,47 @@ export type AgentSessionMutationResult<TValue> =
 	| { ok: true; replayed: boolean; fence: number; cursor: AgentJournalCursor; value: TValue }
 	| { ok: false; refusal: AgentSessionWireRefusal };
 
+export function buildCreateEnvelope(sessionId: string, worktree: string, agent: "claude"): AgentSessionMutationEnvelope {
+	return {
+		sessionId,
+		// Same ledger shape as buildMutationEnvelope: 13-digit ms timestamp + 32 hex chars.
+		clientOperationId: `${Date.now()}-${crypto.randomUUID().replace(/-/g, "")}`,
+		// Create is the one mutation that must NOT fence: the session does not exist yet.
+		expectedRuntimeFence: null,
+		payloadFingerprint: computeAgentSessionPayloadFingerprint({
+			method: "agentSession.create",
+			sessionId,
+			fields: { worktree, agent, resumeFrom: undefined },
+		}),
+	};
+}
+
+// "unknown": the create may or may not have happened (no answer, or Orca's own
+// agent_session_operation_unknown); "failed": Orca answered that nothing was created.
+type CreateOutcome =
+	| { kind: "created"; value: { sessionId: string } }
+	| { kind: "failed" | "unknown"; error: OrcaRemoteError };
+
+function createOutcome(response: RuntimeRpcResponse<AgentSessionMutationResult<{ sessionId: string }>>): CreateOutcome {
+	if (!response.ok) return { kind: "failed", error: new OrcaRemoteError(response.error.message, response.error) };
+	const result = response.result;
+	if (result.ok) return { kind: "created", value: { sessionId: result.value.sessionId } };
+	const error = new OrcaRemoteError(
+		`agentSession.create refused (${result.refusal.code}): ${result.refusal.message}`,
+		result.refusal,
+	);
+	return { kind: result.refusal.code === "agent_session_operation_unknown" ? "unknown" : "failed", error };
+}
+
 export class OrcaRemoteClient {
 	private credential: PairedCredential | null = null;
 	private readonly openSubscriptions = new Set<RemoteRuntimeSubscription>();
+	private readonly createTimeoutMs: number;
+
+	// `createTimeoutMs` is for tests.
+	constructor(options: { createTimeoutMs?: number } = {}) {
+		this.createTimeoutMs = options.createTimeoutMs ?? CREATE_REQUEST_TIMEOUT_MS;
+	}
 
 	// No real socket to open up front (see file header) — this just stores the
 	// credential every subsequent call needs. Kept as an explicit async step
@@ -702,6 +768,88 @@ export class OrcaRemoteClient {
 			return inventory.snapshots.flatMap((snapshot) => filterAgentTabs(snapshot.tabs));
 		} catch (err) {
 			throw toOrcaRemoteError(err);
+		}
+	}
+
+	async listRepos(): Promise<OrcaRepoSummary[]> {
+		const credential = this.requireCredential();
+		try {
+			const response = await sendRemoteRuntimeRequest<{ repos: OrcaRepoSummary[] }>(
+				credential, "repo.list", null, DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+			return unwrapResponse(response).repos;
+		} catch (err) {
+			throw toOrcaRemoteError(err);
+		}
+	}
+
+	// kind must be explicit: Orca's repo.add defaults to 'git', which would refuse a plain folder.
+	async addFolderRepo(path: string, displayName: string): Promise<OrcaRepoSummary> {
+		const credential = this.requireCredential();
+		try {
+			const response = await sendRemoteRuntimeRequest<{ repo: OrcaRepoSummary }>(
+				credential, "repo.add", { path, kind: "folder", displayName }, DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+			return unwrapResponse(response).repo;
+		} catch (err) {
+			throw toOrcaRemoteError(err);
+		}
+	}
+
+	async listWorkspaces(repoId: string): Promise<{ id: string; path: string }[]> {
+		const credential = this.requireCredential();
+		try {
+			const response = await sendRemoteRuntimeRequest<{ worktrees: { id: string; path: string }[] }>(
+				credential, "worktree.list", { repo: `id:${repoId}` }, DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+			return unwrapResponse(response).worktrees.map((w) => ({ id: w.id, path: w.path }));
+		} catch (err) {
+			throw toOrcaRemoteError(err);
+		}
+	}
+
+	// The session id is generated here, so an outcome lost in transit (a timeout, a dropped socket, or
+	// Orca's "may have been created" refusal) is recovered rather than reported as "not created" while
+	// Orca goes on to finish the create: the SAME envelope is sent once more, which Orca's operation
+	// ledger answers as a replay of the committed create, and failing that the id is looked up in
+	// session.tabs.listAll. Only if neither finds it does the original failure stand.
+	async createClaudeSession(workspaceId: string): Promise<{ sessionId: string }> {
+		const credential = this.requireCredential();
+		const sessionId = crypto.randomUUID();
+		const worktree = `id:${workspaceId}`;
+		const params = { envelope: buildCreateEnvelope(sessionId, worktree, "claude"), worktree, agent: "claude" };
+		const send = () =>
+			sendRemoteRuntimeRequest<AgentSessionMutationResult<{ sessionId: string }>>(
+				credential,
+				"agentSession.create",
+				params,
+				this.createTimeoutMs,
+				undefined,
+				undefined,
+				STRUCTURED_AGENT_SESSION_CAPABILITIES,
+			);
+		let outcome: CreateOutcome;
+		try {
+			outcome = createOutcome(await send());
+		} catch (err) {
+			outcome = { kind: "unknown", error: toOrcaRemoteError(err) };
+		}
+		if (outcome.kind === "unknown") {
+			console.warn("[orca-chat] agentSession.create outcome unknown; checking whether Orca created it", outcome.error.message);
+			const replay = await send().then(createOutcome, (err: unknown) => ({ kind: "unknown", error: toOrcaRemoteError(err) }) as const);
+			if (replay.kind === "created") return replay.value;
+			if (await this.hasAgentSession(sessionId)) return { sessionId };
+		}
+		if (outcome.kind === "created") return outcome.value;
+		throw outcome.error;
+	}
+
+	// Whether session.tabs.listAll lists `sessionId`; false if the list itself fails.
+	private async hasAgentSession(sessionId: string): Promise<boolean> {
+		try {
+			return (await this.listAllAgentSessionTabs()).some((tab) => tab.sessionId === sessionId);
+		} catch {
+			return false;
 		}
 	}
 

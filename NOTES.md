@@ -118,6 +118,9 @@ Obsidian's `Plugin.loadData()` at all):
 ~/path/to/YourVault/.obsidian/plugins/orca-chat/data.json
 ```
 
+(Since 0.2.0 the credential is no longer in `data.json`: it is per device, in Obsidian's local
+storage. In Obsidian's developer console, `app.loadLocalStorage("orca-chat:paired-credential")`.)
+
 This has caught real bugs no amount of source-reading did: the `clientOperationId` format
 (`/^(\d{13})-[0-9a-f]{32}$/`, not a plain UUID), and confirming a "still timing out" report was a
 genuinely dead network path (`nc -z <host> <port>`), not a code bug at all.

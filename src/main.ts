@@ -2,13 +2,19 @@ import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { AnnotateModal } from "./annotate-modal";
 import { buildAnnotateMessage, buildObsidianOpenUri, formatLocation, lineRangeFromEditorCursors, readingModeLineRange, sectionInfoToLineTag } from "./annotate-location";
 import { buildFlashcardAskMessage, FlashcardContext, isReviewModalOpen, resolveCurrentFlashcard } from "./flashcard-context";
-import { ORCA_CHAT_VIEW_TYPE, OrcaChatView } from "./chat-view";
+import { ORCA_CHAT_VIEW_TYPE, OrcaChatView, reloadChatViewCredentials } from "./chat-view";
+import { migratePluginStorage } from "./orca-pairing";
 import { PairingModal } from "./pairing-modal";
+import { versionLabel } from "./version";
 
 const ORCA_LINE_TAG_ATTR = "orcaLine";
 
 export default class OrcaChatPlugin extends Plugin {
 	async onload() {
+		console.info(`[orca-chat] ${versionLabel()}`);
+		// Moves a pairing older versions kept in the synced data.json into this device's storage.
+		// The error is not logged: it could carry data.json's contents.
+		migratePluginStorage(this).catch(() => console.error("[orca-chat] couldn't move the pairing into this device's storage"));
 		this.registerView(ORCA_CHAT_VIEW_TYPE, (leaf) => new OrcaChatView(leaf, this));
 
 		this.addCommand({
@@ -63,7 +69,8 @@ export default class OrcaChatPlugin extends Plugin {
 		this.addCommand({
 			id: "pair-with-orca",
 			name: "Pair with Orca",
-			callback: () => new PairingModal(this.app, this).open(),
+			// Open panes read the pairing when they open; after a (re-)pair, have them read it again.
+			callback: () => new PairingModal(this.app, this, () => reloadChatViewCredentials(this.app.workspace)).open(),
 		});
 	}
 
@@ -137,7 +144,7 @@ export default class OrcaChatPlugin extends Plugin {
 			}
 		}
 		if (!chatView.getSelectedHandle()) {
-			chatView.focusPicker();
+			chatView.focusNewSessionButton();
 		}
 		return chatView;
 	}

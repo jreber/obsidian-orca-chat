@@ -10,11 +10,9 @@ export function formatLocation(filePath: string | null, lineRange: LineRange | n
 	return `${filePath}:${lines}`;
 }
 
-// Building the citation as a real obsidian://open link — rather than a bare bracketed path —
-// does double duty: it's clickable in the embedded webview (once the host intercepts the
-// resulting navigation), and it demonstrates the link format to the agent in-context, so it
-// tends to reuse the same format when citing vault files back to us, with no separate
-// instruction needed.
+// The citation is an obsidian://open link rather than a bare bracketed path, so the agent sees
+// exactly which vault file is meant. It is not clickable in the embedded chat: Orca's renderer strips
+// the obsidian:// href. Links the agent writes back are clickable as [[wikilinks]] (wikilinks.ts).
 export function buildAnnotateMessage(
 	selection: string,
 	question: string,

@@ -7,6 +7,7 @@ import { readdirSync, rmSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
+import { buildHash } from "../scripts/build-hash.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const testDir = path.join(root, "test");
@@ -49,6 +50,8 @@ await build({
 	// packages:"external" mangles "node:test"/"node:assert" into the bare (wrong) specifiers
 	// "test"/"assert" — list them explicitly so esbuild leaves the `node:`-prefixed form alone.
 	external: ["node:test", "node:assert", "node:assert/strict"],
+	// As esbuild.config.mjs stamps the plugin build, so src/version.ts reads a real hash in tests.
+	define: { __ORCA_CHAT_BUILD__: JSON.stringify(buildHash(root)) },
 	logLevel: "info",
 });
 
